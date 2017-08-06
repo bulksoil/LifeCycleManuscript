@@ -1,0 +1,415 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(reshape2)
+library(forcats)
+
+setwd("~/Google Drive/RMB/Analyses/LifeCycle/")
+```
+```{r}
+lc_data <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/lc_long_data.rds")
+lc_data <- lc_data %>% 
+  filter(Depth > 5000) %>% 
+  select(SampleID, Compartment, Plot, Cultivar, Site, State, Date, Age, Season, Genotype, Stage, Depth, variable, Collector, value) %>% 
+  filter(paste(Site, Season) == "Arbuckle 2014" | paste(Site, Season) == "Arbuckle 2015" | paste(Site, Season) == "Jonesboro 2016") %>% 
+  group_by(SampleID) %>% 
+  mutate(RA = (value / Depth) * 1000)
+map <- lc_data %>% 
+  group_by(Compartment, Season, SampleID, Age, State, Site, Depth) %>% 
+  filter(value > 0) %>% 
+  summarise(richness = n()) %>% 
+  group_by(Compartment, Site) %>% 
+  arrange(Age) %>% 
+  mutate(sample_order = 1:n())
+tax <- readRDS("~/RMB/Reference/gg_otus_tax.rds")
+```
+
+```{r}
+long_pcoa <- function(x){
+  require(vegan)
+  x2 <- x %>% 
+    select(SampleID, variable, RA, Age, Compartment, Site, Season) %>% 
+    spread(variable, RA, fill = 0)
+  pc <- capscale(log2(x2[,6:ncol(x2)] + 1) ~ 1)
+  pc.axes <- bind_cols(x2[,1:5], as_tibble(scores(pc, choices = c(1:5))$sites))
+  pc.eig <- eigenvals(pc) / sum(eigenvals(pc))
+  pc.results <- list(axes = pc.axes, eig = pc.eig)
+  return(pc.results)
+}
+```
+
+```{r}
+lc.pc <- long_pcoa(lc_data)
+head(lc.pc$eig)
+```
+```{r}
+site.pc <- lc.pc$axes %>% 
+  ggplot(aes(MDS1, MDS2, color = Site)) +
+  geom_point(alpha = 0.8) +
+  theme_minimal() +
+  scale_color_manual(values = c("#f57670ff", "steelblue")) +
+  labs(x = "PCo1 (19.7%)", y = "PCo2 (13.5%)") +
+  theme(legend.position = "none")
+
+compartment.pc <- lc.pc$axes %>% 
+  ggplot(aes(MDS1, MDS2, color = Compartment)) +
+  geom_point(alpha = 0.8) +
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "PCo1 (19.7%)", y = "PCo2 (13.5%)") +
+  theme(legend.position = "none") 
+
+age.pc <- lc.pc$axes %>% 
+  ggplot(aes(MDS1, MDS3, color = Age)) +
+  geom_point(alpha = 0.8) +
+  theme_minimal() +
+  scale_color_gradientn(colours = c("darkgreen", "darkolivegreen4", "darkgoldenrod1", "cornsilk")) +
+  labs(x = "PCo1 (19.7%)", y = "PCo3 (7.5%)") +
+  theme(legend.position = "none") 
+```
+
+```{r}
+library(gridExtra)
+grid.arrange(compartment.pc, site.pc, age.pc, ncol = 3)
+```
+
+```{r}
+long_adonis <- function(x, formula) {
+  x2 <- x %>% 
+    select(SampleID, variable, RA, Age, Compartment, Site, Season, Cultivar) %>% 
+    spread(variable, RA, fill = 0)
+  wide_dat <- x2[,7:ncol(x2)]
+  temp_map <- x2[,1:7]
+  adonis(as.formula(paste("log2(wide_dat + 1) ~ ", formula, sep = "")), data = temp_map)
+}
+
+whole_permanova <- long_adonis(lc_data, formula = "Site * Compartment * Age")
+ark_permanova <- long_adonis(lc_data %>% filter(Site == "Jonesboro"), formula = "Compartment * Age * Cultivar")
+arb_permanova <- long_adonis(lc_data %>% filter(Site == "Arbuckle"), formula = "Compartment * Age * Season")
+```
+
+```{r}
+long_dist <- function(x) {
+  x2 <- x %>% 
+    select(SampleID, variable, RA, Age, Compartment, Site, Season, Cultivar) %>% 
+    spread(variable, RA, fill = 0)
+  wide_dat <- x2[,7:ncol(x2)]
+  temp_map <- x2[,1:7]
+  dis <- as.matrix(vegdist(log2(wide_dat + 1)))
+  row.names(dis) <- temp_map$SampleID
+  colnames(dis) <- temp_map$SampleID
+  return(dis)
+}
+lc_bray <- long_dist(lc_data)
+lc_bray[upper.tri(lc_bray, diag = T)] <- NA
+lc_bray_m <- melt(lc_bray) %>% na.omit() %>% 
+  inner_join(map, by = c("Var1" = "SampleID")) %>% 
+  inner_join(map, by = c("Var2" = "SampleID"))
+write_rds(lc_bray_m, path = "../Data/life_cycle_bray.rds")
+lc_bray_m <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/life_cycle_bray.rds")
+```
+```{r}
+lc_bray_m %>% 
+  filter(Compartment.x == Compartment.y) %>% 
+  filter(Age.x == Age.y) %>% 
+  filter(Site.x != Site.y) %>% 
+  mutate(Stage = factor(ifelse(Age.x < 63, "Vegetative", "Reproductive"))) %>% 
+  mutate(Stage = fct_relevel(Stage, "Vegetative", "Reproductive")) %>% 
+  filter(Compartment.x != "Bulk Soil") %>% 
+  ggplot(aes(Age.x, 1-value, color = Compartment.x, group = Compartment.x)) +
+  geom_point(position = position_jitterdodge(), alpha = 0.3) +
+  theme_minimal() +
+  stat_smooth(aes(group = paste(Compartment.x, Stage), color = Compartment.x), method = "lm", se = F) +
+  scale_color_manual(values = c("#377EBA", "#984EA3")) +
+  labs(x = "Days After Germination", y = "1 - Bray Dissimilarity") +
+  theme(text = element_text(size = 12))
+
+lc_bray_m %>% 
+  filter(Compartment.x == Compartment.y) %>% 
+  filter(Age.x == Age.y) %>% 
+  filter(Site.x != Site.y) %>% 
+  mutate(Stage = factor(ifelse(Age.x < 63, "Vegetative", "Reproductive"))) %>% 
+  mutate(Stage = fct_relevel(Stage, "Vegetative", "Reproductive")) %>% 
+  filter(Compartment.x == "Bulk Soil") %>% 
+  ggplot(aes(Age.x, 1-value, group = Compartment.x, color = Compartment.x)) +
+  geom_point(position = position_jitterdodge(), alpha = 0.3) +
+  theme_minimal() +
+  stat_smooth(aes(group = paste(Compartment.x, Stage), color = Compartment.x), method = "lm", se = F, color = "#E41A1C") +
+  scale_color_manual(values = c("black", "#984EA3")) +
+  labs(x = "Days After Germination", y = "1 - Bray Dissimilarity") +
+  theme(text = element_text(size = 12))
+
+lc_bray_m %>% 
+  filter(Compartment.x == Compartment.y) %>% 
+  filter(Age.x == Age.y) %>% 
+  filter(Site.x != Site.y) %>% 
+  mutate(Stage = factor(ifelse(Age.x < 63, "Vegetative", "Reproductive"))) %>% 
+  mutate(Stage = fct_relevel(Stage, "Vegetative", "Reproductive")) %>% 
+  ggplot(aes(Age.x, 1-value, color = Compartment.x, group = Compartment.x)) +
+  geom_point(position = position_jitterdodge(), alpha = 0.3) +
+  theme_minimal() +
+  stat_smooth(aes(group = paste(Compartment.x, Stage), color = Compartment.x), method = "lm", se = F) +
+  scale_color_manual(values = c("#E41A1C", "#377EBA", "#984EA3")) +
+  labs(x = "Days After Germination", y = "1 - Bray Dissimilarity") +
+  theme(text = element_text(size = 12))
+
+lc_bray_m %>% 
+  filter(Compartment.x == Compartment.y) %>% 
+  filter(Age.x == Age.y) %>% 
+  filter(Site.x != Site.y) %>% 
+  mutate(Stage = factor(ifelse(Age.x < 63, "Vegetative", "Reproductive"))) %>% 
+  mutate(Stage = fct_relevel(Stage, "Vegetative", "Reproductive")) %>% 
+  group_by(Compartment.x, Stage) %>% 
+  nest() %>% 
+  mutate(models = map(data, ~tidy(lm(1-value ~ Age.x, .)))) %>% 
+  unnest(models) %>% 
+  filter(term != "(Intercept)") %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+
+lc_bray_m %>% 
+  filter(Compartment.x == Compartment.y) %>% 
+  filter(Age.x == Age.y) %>% 
+  filter(Site.x != Site.y) %>% 
+  mutate(Stage = factor(ifelse(Age.x < 63, "Vegetative", "Reproductive"))) %>% 
+  mutate(Stage = fct_relevel(Stage, "Vegetative", "Reproductive")) %>% 
+  group_by(Compartment.x) %>% 
+  nest() %>% 
+  filter(Compartment.x != "Bulk Soil") %>% 
+  mutate(models = map(data, ~tidy(lm(1-value ~ Age.x * Stage, .)))) %>% 
+  unnest(models) %>% 
+  filter(term != "(Intercept)") %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+```
+
+```{r}
+lc_bray_m %>% 
+  filter(Season.x == Season.y & Compartment.x == Compartment.y & Site.x == Site.y) %>% 
+  filter(Age.x != Age.y) %>% 
+  filter(Compartment.x != "Bulk Soil") %>% 
+  filter(Season.x == 2014) %>% 
+  rowwise() %>% 
+  mutate(Age2 = min(Age.x, Age.y), Age1 = max(Age.x, Age.y)) %>% 
+  group_by(Compartment.x, Season.x, Site.x) %>% 
+  mutate(z_value = ((1 - value) - mean(1-value)) / sd(1-value)) %>% 
+  group_by(Age1, Age2, Site.x, Compartment.x, Season.x) %>% 
+  summarise(mean_val = mean(z_value)) %>% 
+  ungroup() %>% 
+  mutate(Compartment.x = fct_relevel(Compartment.x, "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  ggplot(aes(Age2, Age1, fill = mean_val)) +
+  geom_tile() +
+  facet_grid(~Compartment.x) +
+  #scale_fill_gradient2(low = "blue", high = "goldenrod") +
+  scale_fill_gradientn(colors = c("navy" ,"blue", "white", "gold")) +
+  theme_minimal() +
+  labs(x = "Days after germination", y = "Days after germination") +
+  theme(text = element_text(size = 12))
+```
+```{r}
+mean_2014 <- lc_bray_m %>% 
+  filter(Season.x == Season.y & Compartment.x == Compartment.y & Site.x == Site.y) %>% 
+  filter(Age.x != Age.y) %>% 
+  filter(Compartment.x != "Bulk Soil") %>% 
+  filter(Season.x == 2014) %>% 
+  rowwise() %>% 
+  mutate(Age2 = min(Age.x, Age.y), Age1 = max(Age.x, Age.y)) %>% 
+  group_by(Compartment.x) %>% 
+  summarize(mean_2014 = mean(1 - value), sd_2014 = sd(1-value))
+hm_2015<- lc_bray_m %>% 
+  filter(Season.x == Season.y & Compartment.x == Compartment.y & Site.x == Site.y) %>% 
+  filter(Age.x != Age.y) %>% 
+  filter(Compartment.x != "Bulk Soil") %>% 
+  filter(Season.x == 2015) %>% 
+  inner_join(mean_2014, by = "Compartment.x") %>% 
+  rowwise() %>% 
+  mutate(Age2 = min(Age.x, Age.y), Age1 = max(Age.x, Age.y)) %>% 
+  group_by(Compartment.x, Season.x, Site.x) %>% 
+  mutate(z_value = ((1 - value) - mean_2014) / sd_2014) %>% 
+  group_by(Age1, Age2, Site.x, Compartment.x, Season.x) %>% 
+  summarise(mean_val = mean(z_value)) %>% 
+  ungroup() %>% 
+  mutate(Compartment.x = fct_relevel(Compartment.x, "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  ggplot(aes(Age2, Age1, color = mean_val)) +
+  geom_point() +
+  facet_grid(~Compartment.x) +
+  #scale_fill_gradient2(low = "blue", high = "goldenrod") +
+  scale_color_gradientn(colors = c("navy", "blue", "white", "gold")) +
+  theme_grey() +
+  labs(x = "Days after germination", y = "Days after germination") +
+  theme(text = element_text(size = 12))
+
+hm_2016 <- lc_bray_m %>% 
+  filter(Season.x == Season.y & Compartment.x == Compartment.y & Site.x == Site.y) %>% 
+  filter(Age.x != Age.y) %>% 
+  filter(Compartment.x != "Bulk Soil") %>% 
+  filter(Season.x == 2016) %>% 
+  inner_join(mean_2014, by = "Compartment.x") %>% 
+  rowwise() %>% 
+  mutate(Age2 = min(Age.x, Age.y), Age1 = max(Age.x, Age.y)) %>% 
+  group_by(Compartment.x, Season.x, Site.x) %>% 
+  mutate(z_value = ((1 - value) - mean_2014) / sd_2014) %>% 
+  #mutate(z_value = ((1 - value) - mean(1-value)) / sd(1-value)) %>% 
+  group_by(Age1, Age2, Site.x, Compartment.x, Season.x) %>% 
+  summarise(mean_val = mean(z_value)) %>% 
+  ungroup() %>% 
+  mutate(Compartment.x = fct_relevel(Compartment.x, "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  ggplot(aes(Age2, Age1, color = mean_val)) +
+  geom_point(size = 5) +
+  facet_grid(~Compartment.x) +
+  #scale_fill_gradient2(low = "blue", high = "goldenrod") +
+  scale_color_gradientn(colors = c("navy", "blue", "white", "gold")) +
+  theme_grey() +
+  labs(x = "Days after germination", y = "Days after germination") +
+  theme(text = element_text(size = 12))
+```
+
+## Phylum Statistics
+```{r}
+phylum.ra <- lc_data %>% 
+  inner_join(tax, by = "variable") %>% 
+  group_by(SampleID, Age, Site, Season, Depth, Phylum2, Compartment) %>% 
+  summarise(total_counts = sum(value) + 1) %>% 
+  mutate(RA = total_counts / (Depth + 1))
+```
+```{r}
+top.phy <- phylum.ra %>% 
+  group_by(Phylum2) %>% 
+  summarise(total = sum(RA)) %>% 
+  top_n(11, total)
+
+phylum.ra %>% 
+  inner_join(top.phy, by = "Phylum2") %>% 
+  inner_join(map %>% ungroup() %>% select(SampleID, sample_order), by = "SampleID") %>% 
+  mutate(Compartment = factor(Compartment, levels = c("Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere"))) %>% 
+  group_by(Compartment, Site, Age, Phylum2, Season) %>% 
+  filter(Season == 2014) %>% 
+  summarise(meanRA = mean(RA)) %>% 
+  ggplot(aes(Age, meanRA, fill = Phylum2)) +
+  geom_bar(stat = "identity") +
+  facet_grid(.~Site + Compartment) +
+  scale_fill_brewer(palette = "Spectral") +
+  theme_minimal()
+
+phy.plot <- phylum.ra %>% 
+  inner_join(top.phy, by = "Phylum2") %>% 
+  inner_join(map %>% ungroup() %>% select(SampleID, sample_order), by = "SampleID") %>% 
+  mutate(Compartment = factor(Compartment, levels = c("Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere"))) %>% 
+  ggplot(aes(sample_order, RA, fill = Phylum2)) +
+  geom_bar(stat = "identity", width  = 1) +
+  geom_point(aes(x = sample_order, y = -0.05, color = Age)) +
+  facet_grid(.~Site + Compartment, space = "free", scales = "free_x") +
+  scale_color_gradientn(colors = c("darkgreen", "darkolivegreen4", "darkgoldenrod1", "cornsilk")) +
+  scale_fill_brewer(palette = "Spectral") +
+  theme_minimal() +
+  labs(x = "", y = "Relative Abundance") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+phy.plot
+```
+
+Beta-regression on phyla abundances
+```{r}
+library(betareg)
+library(broom)
+safe_betareg <- possibly(betareg, NA_real_)
+
+comp_beta_reg <- phylum.ra %>% 
+  mutate(comp_number = ifelse(Compartment == "Bulk Soil", 0, 
+                              ifelse(Compartment == "Rhizosphere", 1,
+                                     ifelse(Compartment == "Rhizoplane", 2,
+                                            ifelse(Compartment == "Endosphere", 3))))) %>% 
+  group_by(Phylum2) %>% 
+  nest() %>% 
+  mutate(model_results = map(data, ~tidy(safe_betareg(RA ~ comp_number, .)))) %>% 
+  unnest(model_results) %>% 
+  mutate(model = "Compartment Model")  
+
+age_beta_reg <- phylum.ra %>% 
+  group_by(Phylum2, Compartment) %>% 
+  nest() %>% 
+  mutate(model_results = map(data, ~tidy(safe_betareg(RA ~ Age, .)))) %>% 
+  unnest(model_results) %>% 
+  mutate(model = "Age Model")
+
+site_beta_reg <- phylum.ra %>% 
+  group_by(Phylum2, Compartment) %>% 
+  nest() %>% 
+  mutate(model_results = map(data, ~tidy(safe_betareg(RA ~ Site, .)))) %>% 
+  unnest(model_results) %>% 
+  mutate(model = "Site Model")
+
+all_models <- bind_rows(comp_beta_reg, age_beta_reg, site_beta_reg)
+write.table(all.models, file = "~/Google Drive/RMB/Analyses/LifeCycle/TABLES/phyla_models.txt", sep = "\t", quote = F)
+all.models <- read.table(file = "~/Google Drive/RMB/Analyses/LifeCycle/TABLES/phyla_models.txt", header = T)
+```
+
+```{r}
+model_combo <- bind_rows(comp_beta_reg, age_beta_reg) %>% 
+  filter(term == "Age" | term == "comp_number") %>% 
+  group_by(model) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon")) %>% 
+  select(-x) %>% 
+  filter(complete.cases(Phylum2))
+
+age_sig <- model_combo %>% filter(model == "Age Model") %>% 
+  filter(p.adj <= 0.01 & Phylum2 != "GN04")
+comp_sig <- model_combo %>% filter(model == "Compartment Model") %>% 
+  filter(p.adj <= 0.01)
+
+keeper_phyla <- unique(c(as.character(age_sig$Phylum2), as.character(comp_sig$Phylum2)))
+
+comp_values <- model_combo[model_combo$Phylum2%in%keeper_phyla,] %>% 
+  filter(model == "Compartment Model") %>% 
+  mutate(Phylum2 = fct_reorder(Phylum2, estimate))
+age_values <- model_combo[model_combo$Phylum2%in%keeper_phyla,] %>% 
+  filter(model == "Age Model") %>% 
+  filter(p.adj <= 0.01)
+age_values$Phylum2 <- factor(age_values$Phylum2, levels = levels(comp_values$Phylum2))
+
+to.plot <- bind_rows(comp_values, age_values) %>% 
+  mutate(sig = ifelse(p.adj <= 0.01, "sig", "ns")) %>% 
+  mutate(compartment_number = fct_recode(Compartment,
+                                         "1" = "Bulk Soil",
+                                         "2" = "Rhizosphere",
+                                         "3" = "Rhizoplane",
+                                         "4" = "Endosphere")) %>% 
+  mutate(compartment_number = as.numeric(as.character(compartment_number))) %>% 
+  ungroup() %>% 
+  mutate(model = fct_relevel(model, "Compartment Model", "Age Model"))
+
+model.plot <- ggplot() +
+  geom_segment(data = filter(to.plot, model == "Compartment Model"), aes(x = Phylum2, xend = Phylum2, y = 0, yend = estimate)) +
+  geom_point(data = filter(to.plot, model == "Compartment Model"), aes(x = Phylum2, y = estimate, shape = sig)) +
+  geom_tile(data = filter(to.plot, model == "Age Model"), aes(x = Phylum2, y = compartment_number, fill = estimate)) +
+  scale_fill_gradient2(low = "darkgreen", high = "gold") +
+  scale_shape_manual(values = c(1, 16)) +
+  facet_grid(model ~ ., scales = "free") +
+  theme_minimal() +
+  labs(x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+model.plot
+```
+
+
+```{r}
+grid.arrange(phy.plot, model.plot, nrow = 2)
+```
+
+
+
+```{r}
+
+```
+
+
+
+
+
+
+
+

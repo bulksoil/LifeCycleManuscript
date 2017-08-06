@@ -1,0 +1,1130 @@
+---
+title: "Random Forests 2"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(forcats)
+library(randomForest)
+library(lubridate)
+library(vegan)
+library(broom)
+library(biobroom)
+
+setwd("~/Google Drive/RMB/Analyses/LifeCycle/")
+```
+
+```{r}
+tax <- readRDS("~/RMB/Reference/gg_otus_tax.rds")
+```
+
+## Separate into testing and training data
+
+Run the commented code below if you want to do that
+```{r}
+#lc_data <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/lc_long_data.rds")
+
+#training_samples <- lc_data %>% 
+#  filter(Site == "Arbuckle" | Site == "Jonesboro") %>% 
+#  filter(Season != "2015" & paste(Site, Season) != "Arbuckle 2016") %>% 
+#  group_by(SampleID, Compartment, Age, Site, Season) %>% 
+#  summarise(n()) %>% 
+#  group_by(Compartment, Age, Site, Season) %>% 
+#  sample_frac(0.5) %>% 
+#  mutate(type = "Train")
+
+#train_data <- lc_data %>% 
+#  inner_join(training_samples %>% ungroup() %>% select(SampleID, type), by = "SampleID") %>% 
+#  group_by(variable) %>% 
+#  filter(sum(value) > 0) %>% 
+#  mutate(RA = (value / Depth) * 1000, log2value = log2(RA + 1))
+
+#test_data <- lc_data %>% ungroup() %>% 
+#  filter(paste(Season, Site) != "2016 Arbuckle") %>% 
+#  anti_join(training_samples %>% ungroup() %>% select(SampleID, type), by = "SampleID") %>% 
+#  mutate(type = "Test") %>% 
+#  group_by(variable) %>%  
+#  mutate(RA = (value / Depth) * 1000, log2value = log2(RA + 1))
+
+#write_rds(train_data, "~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/train_data.rds")
+#write_rds(test_data, "~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/test_data.rds")
+```
+
+```{r}
+train_data <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/train_data.rds")
+test_data <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/test_data.rds")
+```
+
+
+### Functions for doing Random Forests on Tidy Data
+```{r}
+## When using this function for each compartment and each site start from the third column
+## If using for combining both sites, start at the fourth column
+rfcv_tidy_age <- function(x){
+  cv <- rfcv(x[,4:ncol(x)], x$Age, cv.fold = 10, log = T)
+  paste(names(cv$error), cv$error, sep = "_")
+}
+
+get_importance_age <- function(x){
+  rf <- randomForest(x[,4:ncol(x)], x$Age, importance = T)
+  imps <- as.data.frame(rf$importance)
+  imps$variable <- row.names(imps)
+  names(imps)[1] <- "PercIncMSE"
+  as_tibble(imps)
+}
+
+tidy_randomforest_age <- function(x) {
+  randomForest(x[,4:ncol(x)], x$Age, importance = F, keep.forest = T)
+}
+
+tidy_predict_age <- function(model, data) {
+  predict(model, data[,4:ncol(data)])
+}
+```
+
+```{r}
+cvs <- train_data %>% 
+  select(type, Compartment, Site, Age, log2value, variable, SampleID) %>% 
+  spread(variable, log2value, fill = 0) %>% 
+  group_by(Compartment, Site, type) %>% 
+  nest() %>% 
+  filter(Compartment != "Bulk Soil" & type == "Train") %>% 
+  mutate(cv = map(data, ~rfcv_tidy_age(.)))
+
+cvs %>% 
+  unnest(cv) %>% 
+  separate(cv, c("OTUs", "Error"), "_", convert = T) %>% 
+  ggplot(aes(OTUs, Error, color = Site)) +
+  geom_line() +
+  facet_grid(.~Compartment) +
+  scale_x_log10()
+
+cvs %>% 
+  unnest(cv) %>% 
+  separate(cv, c("OTUs", "Error"), "_", convert = T) %>% 
+  group_by(Compartment, Site) %>% 
+  filter(Error == min(Error))
+```
+
+### Let's idenitify the most important OTUs
+```{r}
+imps <- train_data %>% 
+  filter(Compartment != "Bulk Soil" & type == "Train" & Compartment != "Rhizoplane") %>% 
+  select(SampleID, Age, Compartment, Site, variable, log2value) %>% 
+  spread(variable, log2value, fill = 0) %>% 
+  group_by(Site, Compartment) %>% 
+  nest() %>% 
+  mutate(imp = map(data, ~get_importance_age(.)))
+
+top_otus <- imps %>% 
+  unnest(imp) %>% 
+  group_by(Compartment, Site) %>% 
+  top_n(85, PercIncMSE)
+```
+
+
+```{r}
+site_sharing_rf_otus <- top_otus %>% 
+  group_by(variable, Compartment) %>% 
+  summarise(n = n()) %>% 
+  filter(n == 2) %>% 
+  inner_join(tax, by = "variable")
+
+compartment_sharing_rf_otus <- top_otus %>% 
+  group_by(variable, Site) %>% 
+  summarise(n = n()) %>% 
+  filter(n == 2) %>% 
+  inner_join(tax, by = "variable")
+```
+
+```{r}
+rf_sparse <- train_data %>% 
+  inner_join(top_otus, by = c("Compartment", "Site", "variable")) %>% 
+  select(SampleID, Age, Compartment, type, variable, log2value, Site) %>% 
+  group_by(Compartment, type, Site) %>%
+  nest(., .key = "train_data") %>% 
+  mutate(train_spread_data = map(train_data, ~spread(., variable, log2value, fill = 0))) %>% 
+  mutate(rf = map(train_spread_data, ~tidy_randomforest_age(.)))
+
+rf_sparse %>% 
+  mutate(predictions = map2(rf, train_spread_data, predict)) %>% 
+  unnest(train_spread_data, predictions) %>% 
+  select(Compartment, Site, predictions, Age) %>% 
+  ggplot(aes(Age, predictions)) +
+  geom_point() +
+  facet_grid(Compartment ~ Site)
+
+write_rds(rf_sparse, path = "~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/rf_sparse.rds")
+```
+
+```{r}
+safe_predict <- possibly(predict, NA_real_)
+
+arb_model_test_predictions <- bind_rows(train_data, test_data) %>% 
+  inner_join(top_otus %>% ungroup() %>% filter(Site == "Arbuckle") %>% select(Compartment, variable), by = c("variable", "Compartment")) %>% 
+  select(SampleID, Age, variable, log2value, Site, Compartment, Season, type, Date, Cultivar) %>% 
+  group_by(Compartment, Season, type, Site, SampleID, Age, Date, Cultivar) %>% 
+  mutate(log2value = ifelse(is.na(log2value), 0, log2value)) %>% 
+  nest() %>% 
+  mutate(spread_data = map(data, ~(spread(., variable, log2value, fill = 0)))) %>% 
+  select(-data) %>% 
+  inner_join(rf_sparse %>% filter(Site == "Arbuckle") %>% ungroup() %>% select(Compartment, rf), by = "Compartment") %>% 
+  mutate(predictions = map2(rf, spread_data, safe_predict)) %>% 
+  mutate(model = paste("Arbuckle", Compartment))
+
+ark_model_test_predictions <- bind_rows(train_data, test_data) %>% 
+  inner_join(top_otus %>% ungroup() %>% filter(Site == "Jonesboro") %>% select(Compartment, variable), by = c("variable", "Compartment")) %>% 
+  select(SampleID, Age, variable, log2value, Site, Compartment, Season, type, Date, Cultivar) %>% 
+  group_by(Compartment, Season, type, Site, SampleID, Age, Date, Cultivar) %>% 
+  mutate(log2value = ifelse(is.na(log2value), 0, log2value)) %>% 
+  nest() %>% 
+  mutate(spread_data = map(data, ~(spread(., variable, log2value, fill = 0)))) %>% 
+  select(-data) %>% 
+  inner_join(rf_sparse %>% filter(Site == "Jonesboro") %>% ungroup() %>% select(Compartment, rf), by = "Compartment") %>% 
+  mutate(predictions = map2(rf, spread_data, safe_predict)) %>% 
+  mutate(model = paste("Jonesboro", Compartment))
+```
+
+```{r}
+bind_rows(arb_model_test_predictions, ark_model_test_predictions)  %>% 
+  filter(Site == "Arbuckle" | Site == "Jonesboro") %>% 
+  unnest(predictions) %>% 
+  mutate(Date = mdy(Date)) %>% 
+  mutate(Season2 = year(Date)) %>% 
+  mutate(residual = Age - predictions) %>% 
+  mutate(fill = factor(paste(Site, type))) %>% 
+  mutate(fill = fct_relevel(fill, "Arbuckle Train", "Arbuckle Test", "Jonesboro Train", "Jonesboro Test")) %>% 
+  mutate(model = fct_relevel(model, "Arbuckle Rhizosphere", "Arbuckle Endosphere", "Jonesboro Rhizosphere", "Jonesboro Endosphere")) %>% 
+  ggplot(aes(factor(Season), abs(residual), fill = fill, alpha = type)) +
+  geom_boxplot(outlier.colour = 'black', outlier.size = 0.2) +
+  facet_grid(. ~ model) +
+  theme_minimal() +
+  scale_fill_manual(values = c("#f57670ff", "#f57670ff", 'steelblue', 'steelblue')) +
+  scale_alpha_manual(values = c(0.5, 0.9)) +
+  labs(x = "Season", y = "Prediction Error (Days)") +
+  theme(text = element_text(size = 12))
+```
+
+```{r}
+bind_rows(arb_model_test_predictions, ark_model_test_predictions)  %>% 
+  filter(Site == "Arbuckle" | Site == "Jonesboro") %>% 
+  unnest(predictions) %>% 
+  mutate(Date = mdy(Date)) %>% 
+  mutate(Season2 = year(Date)) %>% 
+  mutate(residual = Age - predictions) %>% 
+  mutate(fill = factor(paste(Site, type))) %>% 
+  mutate(fill = fct_relevel(fill, "Arbuckle Train", "Arbuckle Test", "Jonesboro Train", "Jonesboro Test")) %>% 
+  mutate(model = fct_relevel(model, "Arbuckle Rhizosphere", "Arbuckle Endosphere", "Jonesboro Rhizosphere", "Jonesboro Endosphere")) %>% 
+  ggplot(aes(Age, predictions, fill = fill, alpha = type)) +
+  geom_point() +
+  facet_grid(Site ~ model) +
+  theme_minimal() +
+  scale_fill_manual(values = c("#f57670ff", "#f57670ff", 'steelblue', 'steelblue')) +
+  scale_alpha_manual(values = c(0.5, 0.9)) +
+  labs(x = "Season", y = "Prediction Error (Days)") +
+  theme(text = element_text(size = 12))
+```
+
+
+```{r}
+heat_map_order <- function(x) {
+
+  x2 <- x %>%
+    ungroup() %>% 
+    select(Age, variable, mean_abund) %>% 
+    spread(variable, mean_abund)
+  
+  hc <- hclust(vegdist(t(x2[,-1]), method = "jaccard"))
+  
+  order <- tibble(position = hc$order, order = 1:length(hc$order)) %>% 
+    arrange(position) %>% 
+    mutate(variable = names(x2)[-1])
+  
+  x %>% 
+    inner_join(order, by = "variable")
+}
+
+scaled_otus <- bind_rows(train_data, test_data) %>%
+  inner_join(top_otus %>% ungroup() %>% select(Compartment, variable, Site), by = c("Site", "Compartment", "variable")) %>% 
+  filter(Season != 2015) %>% 
+  group_by(variable, Site, Season, Compartment) %>% 
+  mutate(min_value = min(RA), max_value = max(RA), scaled_value = (RA - min_value) / (max_value - min_value)) %>% 
+  group_by(Age, Compartment, Season, variable, Site) %>% 
+  summarise(mean_abund = mean(scaled_value))
+
+plotting_order <- scaled_otus %>% 
+  filter(Season != "2015") %>% 
+  group_by(Compartment, Site, Season) %>% 
+  nest() %>% 
+  mutate(order = map(data, ~heat_map_order(.)))
+
+arb_plots <- plotting_order %>% 
+  filter(Site == "Arbuckle") %>% 
+  unnest(order) %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  inner_join(tax, by = "variable") %>% 
+  ggplot(aes(Age, order, fill = mean_abund)) +
+  geom_tile() +
+  facet_grid(.~Compartment) +
+  scale_fill_gradientn(colors = brewer.pal(8, "GnBu")) +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.y = element_blank()) +
+  labs(x = "", y = "")
+  
+
+ark_plots <- plotting_order %>% 
+  filter(Site == "Jonesboro") %>% 
+  unnest(order) %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(Age, order, fill = mean_abund)) +
+  geom_tile() +
+  facet_grid(.~Compartment) +
+  scale_fill_gradientn(colors = brewer.pal(8, "GnBu")) +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.y = element_blank()) +
+  labs(x = "", y = "")
+
+grid.arrange(arb_plots, ark_plots, nrow = 1)
+```
+
+
+```{r}
+otu_directions <- bind_rows(train_data, test_data) %>%
+  inner_join(top_otus %>% ungroup() %>% select(Compartment, variable, Site), by = c("Site", "Compartment", "variable")) %>% 
+  filter(Season != 2015) %>% 
+  group_by(variable, Site, Season, Compartment, variable) %>% 
+  nest() %>% 
+  mutate(models = map(data, ~tidy(lm(log2value ~ Age, .)))) %>% 
+  unnest(models) %>% 
+  filter(term != "(Intercept)") %>% 
+  group_by(Compartment, Site) %>% 
+  mutate(p.adj = p.adjust(p.value, "BH")) %>% 
+  mutate(direction = ifelse(estimate > 0, "increasing", "decreasing")) %>% 
+  mutate(classification = ifelse(p.adj > 0.05, "neutral", direction)) 
+  
+otu_directions %>% ungroup() %>% 
+  inner_join(tax, by = "variable") %>%
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  mutate(classification = fct_relevel(classification, "increasing", "neutral", "decreasing")) %>% 
+  ggplot(aes(Phylum2, fill = paste(Phylum2, Order))) +
+  geom_bar() +
+  facet_grid(classification + Compartment ~ Site) +
+  theme_bw()
+
+otu_directions %>% 
+  inner_join(tax, by = "variable") %>% 
+  mutate(tax_level = paste(Phylum2, Order)) %>% 
+  group_by(Site, tax_level, classification) %>% 
+  summarise(n = n()) %>% 
+  mutate(sharing = ifelse(n > 1, "Shared", "Unique")) %>% 
+  group_by(Site, classification, sharing) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(Site, n, fill = sharing)) +
+  geom_bar(stat = "identity") +
+  facet_grid(.~classification)
+
+plotting_order %>% filter(Site == "Arbuckle") %>% unnest(order) %>% 
+  inner_join(otu_directions, by = c("variable", "Compartment", "Site")) %>% 
+  ggplot(aes(Age, order, fill = mean_abund)) +
+  geom_tile() +
+  facet_grid(.~Compartment) +
+  scale_fill_gradientn(colors = brewer.pal(8, "GnBu")) +
+  geom_point(aes(x = max(Age) + 7, y = order, color = classification)) +
+  theme_minimal() +
+  scale_color_manual(values = c("dodgerblue", "gold", "grey50")) +
+  theme(legend.position = "none", axis.text.y = element_blank()) +
+  labs(x = "", y = "")
+  
+```
+
+
+## Make a common model
+```{r}
+cvs_combo <- train_data %>% 
+  select(type, Compartment, Site, Age, log2value, variable, SampleID) %>% 
+  spread(variable, log2value, fill = 0) %>% 
+  group_by(Compartment, type) %>% 
+  nest() %>% 
+  filter(Compartment != "Bulk Soil" & type == "Train") %>% 
+  mutate(cv = map(data, ~rfcv_tidy_age(.)))
+
+cvs_combo %>% 
+  unnest(cv) %>% 
+  separate(cv, c("OTUs", "Error"), "_", convert = T) %>% 
+  ggplot(aes(OTUs, Error)) +
+  geom_line() +
+  facet_grid(.~Compartment) +
+  scale_x_log10()
+
+cvs_combo %>% 
+  unnest(cv) %>% 
+  separate(cv, c("OTUs", "Error"), "_", convert = T) %>% 
+  group_by(Compartment) %>% 
+  filter(Error == min(Error))
+```
+
+
+```{r}
+imps_combo <- train_data %>% 
+  filter(Compartment != "Bulk Soil" & type == "Train" & Compartment != "Rhizoplane") %>% 
+  select(SampleID, Age, Compartment, Site, variable, log2value) %>% 
+  spread(variable, log2value, fill = 0) %>% 
+  group_by(Compartment) %>% 
+  nest() %>% 
+  mutate(imp = map(data, ~get_importance_age(.)))
+
+top_otus_combo <- imps_combo %>% 
+  unnest(imp) %>% 
+  group_by(Compartment) %>% 
+  top_n(85, PercIncMSE)
+
+compartment_sharing_rf_otus_combo <- top_otus_combo %>% 
+  group_by(variable) %>% 
+  summarise(n = n()) %>% 
+  filter(n == 2) %>% 
+  inner_join(tax, by = "variable")
+```
+```{r}
+top_otus_combo %>% 
+  inner_join(tax, by = "variable") %>% 
+  group_by(Compartment, paste(Phylum, Class, Order, Family)) %>% 
+  summarise(n = n()) %>% 
+  group_by(Compartment) %>% 
+  summarise(n())
+```
+
+```{r}
+get_importance <- function(rf) {
+  as_tibble(rownames_to_column(data.frame(importance(rf)), var = "variable"))
+}
+
+rf_sparse_combo <- train_data %>% 
+  inner_join(top_otus_combo, by = c("Compartment", "variable")) %>% 
+  select(SampleID, Age, Compartment, type, variable, log2value, Site) %>% 
+  group_by(Compartment, type) %>%
+  nest(., .key = "train_data") %>% 
+  mutate(train_spread_data = map(train_data, ~spread(., variable, log2value, fill = 0))) %>% 
+  mutate(rf = map(train_spread_data, ~tidy_randomforest(.)))
+
+rf_sparse_combo %>% 
+  mutate(predictions = map2(rf, train_spread_data, predict)) %>% 
+  unnest(train_spread_data, predictions) %>% 
+  select(Compartment, Site, predictions, Age) %>% 
+  ggplot(aes(Age, predictions)) +
+  geom_point() +
+  facet_grid(Compartment ~ Site)
+
+#write_rds(rf_sparse_combo, path = "~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/rf_sparse_combo.rds")
+rf_sparse_combo <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/rf_sparse_combo.rds")
+
+top_otus_combo <- rf_sparse_combo %>% 
+  mutate(importance = map(rf, ~get_importance(.))) %>% 
+  unnest(importance)
+
+```
+
+```{r}
+safe_predict <- possibly(predict, NA_real_)
+
+model_test_predictions_combo <- bind_rows(train_data, test_data) %>% 
+  inner_join(top_otus_combo %>% ungroup() %>% select(Compartment, variable), by = c("variable", "Compartment")) %>% 
+  select(SampleID, Age, variable, log2value, Site, Compartment, Season, type, Date, Cultivar) %>% 
+  group_by(Compartment, Season, type, Site, SampleID, Age, Date, Cultivar) %>% 
+  mutate(log2value = ifelse(is.na(log2value), 0, log2value)) %>% 
+  nest() %>% 
+  mutate(spread_data = map(data, ~(spread(., variable, log2value, fill = 0)))) %>% 
+  select(-data) %>% 
+  inner_join(rf_sparse_combo %>% ungroup() %>% select(Compartment, rf), by = "Compartment") %>% 
+  mutate(predictions = map2(rf, spread_data, safe_predict)) %>% 
+  mutate(model = Compartment)
+
+model_test_predictions_combo %>% 
+  unnest(predictions) %>% 
+  ungroup() %>% 
+  select(SampleID, Compartment, Site, type, Age, Cultivar, predictions, model, Season) %>% 
+  filter(Site == "Arbuckle" | Site == "Jonesboro") %>% 
+  write_tsv(., "~/Google Drive/RMB/Analyses/LifeCycle/TABLES/age_predictions.txt")
+```
+
+```{r}
+pred_plot <- model_test_predictions_combo %>% 
+  unnest(predictions) %>% 
+  filter(Site == "Arbuckle" | Site == "Jonesboro") %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(Age, predictions, color = factor(Season), shape = type)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted") +
+  geom_point() +
+  scale_shape_manual(values = c(16, 1)) +
+  facet_grid(Site ~ Compartment) +
+  scale_color_manual(values = c("#f57670ff", "red", "steelblue")) +
+  theme_minimal() +
+  labs(x = "Age (Days)", y = "Predicted Age (Days)") +
+  theme(text = element_text(size = 12), legend.position = "none")
+
+model_test_predictions_combo %>% 
+  unnest(predictions) %>% 
+  filter(Site != "Arbuckle" & Site != "Jonesboro") %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(Site, predictions, color = Site)) +
+  geom_point(position = position_jitter(width = 0.2)) +
+  facet_grid(.~Compartment)
+``` 
+```{r}
+otu_directions_combo <- bind_rows(train_data, test_data) %>%
+  inner_join(top_otus_combo %>% ungroup() %>% select(Compartment, variable), by = c("Compartment", "variable")) %>% 
+  filter(Season != 2015) %>% 
+  group_by(Compartment, variable) %>% 
+  nest() %>% 
+  mutate(models = map(data, ~tidy(lm(log2value ~ Age, .)))) %>% 
+  unnest(models) %>% 
+  filter(term != "(Intercept)") %>% 
+  group_by(Compartment) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon")) %>% 
+  mutate(direction = ifelse(estimate > 0, "Increasing", "Decreasing")) %>% 
+  mutate(classification = ifelse(p.adj > 0.05, "Neutral", direction)) 
+
+#write_rds(otu_directions_combo, path = "~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/otu_directions.rds")
+otu_directions_combo <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/otu_directions.rds")
+
+otu_directions_combo %>% 
+  inner_join(tax, by = "variable") %>%
+  group_by(Phylum2, Compartment, classification) %>% 
+  summarise(n = n()) %>%
+  group_by(Phylum2) %>% 
+  mutate(total = sum(n)) %>% ungroup() %>% 
+  mutate(Phylum2 = fct_reorder(Phylum2, total)) %>% 
+  mutate(classification = fct_relevel(classification, "Neutral", "Decreasing", "Increasing")) %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(Phylum2, n, fill = classification)) +
+  geom_bar(stat = "identity") +
+  facet_grid(.~Compartment) +
+  coord_flip() +
+  scale_fill_manual(values = c("grey50", "dodgerblue", "gold")) +
+  theme_minimal() +
+  theme(text = element_text(size = 12))
+```
+```{r}
+imp_abund_combo <- bind_rows(train_data, test_data) %>%
+  inner_join(otu_directions_combo %>% ungroup() %>% select(Compartment, variable, classification), by = c("Compartment", "variable")) %>% 
+  filter(Season != 2015) %>% 
+  group_by(Compartment, SampleID, Site, Season, Age, classification) %>% 
+  summarise(total = sum(RA))
+
+imp_abundance_plot <- imp_abund_combo %>% 
+  group_by(Compartment, Age, Site, classification) %>% 
+  summarise(mean = mean(total / 10), ste = sd(total / 10) / sqrt(n())) %>% 
+  ungroup() %>% mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(Age, mean, fill = classification)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = mean - ste, ymax = mean + ste), 
+                position = position_dodge(width = 6.5),
+                size = 0.3,
+                width = 0.2) +
+  facet_grid(Compartment~Site, scales = "free_y") +
+  theme_minimal() +
+  scale_fill_manual(values = c("dodgerblue", "gold", "grey50")) +
+  labs(y = "Mean Relative Abundance (%)") +
+  theme(text = element_text(size = 12), legend.position = "none")
+
+grid.arrange(pred_plot, imp_abundance_plot)
+```
+
+```{r}
+otu_directions_combo %>% 
+  inner_join(tax, by = "variable") %>% 
+  ggplot(aes(Phylum2, fill = paste(Order, Phylum2))) +
+  geom_bar() +
+  facet_grid(Compartment ~ classification, scales = "free_y") +
+  theme_bw() +
+  labs(y = "Number of OTUs", x = "") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+
+otu_directions_combo %>% 
+  inner_join(tax, by = "variable") %>% 
+  ggplot(aes(Phylum2, color = paste(Order, Phylum2))) +
+  geom_bar() +
+  facet_grid(Compartment ~ classification, scales = "free_y") +
+  theme_bw() +
+  labs(y = "Number of OTUs", x = "") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+```
+
+```{r}
+otu_directions_combo %>% 
+  select(Compartment, classification, variable) %>% 
+  group_by(variable) %>% 
+  summarise(n = n()) %>% 
+  filter(n == 2)
+
+otu_directions_combo %>% 
+  select(Compartment, classification, variable) %>% 
+  group_by(variable, classification) %>% 
+  summarise(n = n()) %>% 
+  filter(n == 2)
+```
+
+
+```{r}
+heat_map_order <- function(x) {
+
+  x2 <- x %>%
+    ungroup() %>% 
+    select(Age, variable, mean_abund) %>% 
+    spread(variable, mean_abund)
+  
+  hc <- hclust(vegdist(t(x2[,-1]), method = "jaccard"))
+  
+  order <- tibble(position = hc$order, order = 1:length(hc$order)) %>% 
+    arrange(position) %>% 
+    mutate(variable = names(x2)[-1])
+  
+  x %>% 
+    inner_join(order, by = "variable")
+}
+
+scaled_otus_combo <- bind_rows(train_data, test_data) %>%
+  inner_join(top_otus_combo %>% ungroup() %>% select(Compartment, variable), by = c("Compartment", "variable")) %>% 
+  filter(Season != 2015) %>% 
+  group_by(variable, Site, Compartment) %>% 
+  mutate(min_value = min(RA), max_value = max(RA), scaled_value = (RA - min_value) / (max_value - min_value)) %>% 
+  group_by(Site, Age, Compartment, variable) %>% 
+  summarise(mean_abund = mean(scaled_value))
+
+plotting_order_combo <- scaled_otus_combo %>% 
+  filter(Site == "Arbuckle") %>% 
+  group_by(Compartment, Site) %>% 
+  nest() %>% 
+  mutate(order = map(data, ~heat_map_order(.))) %>% 
+  unnest(order)
+
+arb_es_plot <- scaled_otus_combo %>% 
+  inner_join(plotting_order_combo %>% ungroup() %>%  select(Compartment, variable, order), by = c("variable", "Compartment")) %>% 
+  filter(Site == "Arbuckle" & Compartment == "Endosphere") %>% 
+  inner_join(otu_directions_combo, by = c("variable", "Compartment")) %>% 
+  ggplot(aes(Age, order, fill = mean_abund)) +
+  geom_tile() +
+  geom_point(aes(x = max(Age) + 7, y = order, color = classification), size = 0.5) +
+  scale_color_manual(values = c("dodgerblue", "gold", "grey")) +
+  facet_grid(.~Site + Compartment) +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.y = element_blank()) +
+  scale_fill_gradientn(colors = brewer.pal(8, "GnBu")) +
+  labs(y = "")
+
+arb_rs_plot <- scaled_otus_combo %>% 
+  inner_join(plotting_order_combo %>% ungroup() %>%  select(Compartment, variable, order), by = c("variable", "Compartment")) %>% 
+  filter(Site == "Arbuckle" & Compartment == "Rhizosphere") %>% 
+  inner_join(otu_directions_combo, by = c("variable", "Compartment")) %>% 
+  ggplot(aes(Age, order, fill = mean_abund)) +
+  geom_tile() +
+  geom_point(aes(x = max(Age) + 7, y = order, color = classification), size = 0.5) +
+  scale_color_manual(values = c("dodgerblue", "gold", "grey")) +
+  facet_grid(.~Site + Compartment) +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.y = element_blank()) +
+  scale_fill_gradientn(colors = brewer.pal(8, "GnBu")) +
+  labs(y = "")
+
+
+ark_es_plot <- scaled_otus_combo %>% 
+  inner_join(plotting_order_combo %>% ungroup() %>%  select(Compartment, variable, order), by = c("variable", "Compartment")) %>% 
+  filter(Site == "Jonesboro" & Compartment == "Endosphere") %>% 
+  inner_join(otu_directions_combo, by = c("variable", "Compartment")) %>% 
+  ggplot(aes(Age, order, fill = mean_abund)) +
+  geom_tile() +
+  geom_point(aes(x = max(Age) + 7, y = order, color = classification), size = 0.5) +
+  scale_color_manual(values = c("dodgerblue", "gold", "grey")) +
+  facet_grid(.~Site + Compartment) +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.y = element_blank()) +
+  scale_fill_gradientn(colors = brewer.pal(8, "GnBu")) +
+  labs(y = "")
+
+ark_rs_plot <- scaled_otus_combo %>% 
+  inner_join(plotting_order_combo %>% ungroup() %>%  select(Compartment, variable, order), by = c("variable", "Compartment")) %>% 
+  filter(Site == "Jonesboro" & Compartment == "Rhizosphere") %>% 
+  inner_join(otu_directions_combo, by = c("variable", "Compartment")) %>% 
+  ggplot(aes(Age, order, fill = mean_abund)) +
+  geom_tile() +
+  geom_point(aes(x = max(Age) + 7, y = order, color = classification), size = 0.5) +
+  scale_color_manual(values = c("dodgerblue", "gold", "grey")) +
+  facet_grid(.~Site + Compartment) +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.y = element_blank()) +
+  scale_fill_gradientn(colors = brewer.pal(8, "GnBu")) +
+  labs(y = "")
+
+grid.arrange(arb_es_plot, ark_es_plot, arb_rs_plot, ark_rs_plot, nrow = 1)
+```
+
+
+```{r}
+safe_lm <- possibly(lm, NA_real_)
+site_lm <- bind_rows(train_data, test_data) %>%
+  filter(Compartment == "Endosphere" | Compartment == "Rhizosphere")
+  inner_join(same_ages, by = "Age") %>% 
+  ungroup() %>% select(Age, SampleID, Compartment, Site, log2value, Season, variable) %>% 
+  filter(Site == "Arbuckle" | Site == "Jonesboro") %>% 
+  filter(Season != 2015) %>% 
+  group_by(variable, Compartment) %>% 
+  filter(sum(log2value > 0) / n() > 0.1) %>% 
+  group_by(Compartment, variable, Age) %>% 
+  nest() %>% 
+  mutate(model = map(data, ~tidy(safe_lm(log2value ~ Site, .)))) %>% 
+  unnest(model)
+  
+saveRDS(site_lm, "~/Google Drive/RMB/Analyses/LifeCycle/Data/site_lm.rds")
+
+lm_classification <- site_lm %>% 
+  filter(p.value != "NaN" & term == "SiteJonesboro") %>% 
+  group_by(Compartment) %>% 
+  filter(Compartment != "Bulk Soil") %>% 
+  mutate(p.adj = p.adjust(p.value, "bon")) %>% 
+  filter(p.adj <= 0.05) %>% 
+  mutate(Site = ifelse(estimate < 0, "Arbuckle", "Jonesboro")) 
+
+lm_classification %>% 
+  group_by(Compartment, Site, Age) %>% 
+  summarise(n = n())  %>% ungroup() %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(Age, n, fill = Site)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_grid(.~Compartment) +
+  scale_fill_manual(values = c("#f57670ff", "steelblue")) +
+  theme_minimal()
+
+lm_classification %>% 
+  group_by(Compartment, variable) %>% 
+  summarise(n = n()) %>% 
+  group_by(Compartment) %>% 
+  summarise(n = n())
+
+lm_classification_abund <- bind_rows(train_data, test_data) %>%
+  inner_join(lm_classification, by = c("variable", "Compartment", "Site", "Age")) %>% 
+  group_by(Compartment, Site, Age, SampleID) %>% 
+  summarise(total = sum(RA))
+
+
+lm_classification_abund %>% 
+  group_by(Compartment, Site, Age) %>% 
+  summarise(mean_ab = mean(total / 10), se = sd(total / 10) / sqrt(n())) %>% ungroup() %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(Age, mean_ab, fill = Site)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = mean_ab - se, ymax = mean_ab + se), position = position_dodge(width = 12.5), width = 0.1, size = 0.2) +
+  facet_grid(.~Compartment) +
+  scale_fill_manual(values = c("#f57670ff", "steelblue")) +
+  theme_minimal()
+  
+  
+  
+lm_classification_abund %>% 
+  group_by(Compartment, Site) %>% 
+  nest() %>% 
+  mutate(model = map(data, ~tidy(lm(total ~ Age, .)))) %>% 
+  unnest(model) %>% 
+  filter(term != "(Intercept)") %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+  
+
+lm_classification %>% 
+  group_by(Compartment, Site, variable) %>% 
+  summarise(count = n()) %>% 
+  group_by(count, Site, Compartment) %>% 
+  summarise(count2 = n()) %>% 
+  ggplot(aes(count, count2)) +
+  geom_bar(stat = "identity") +
+  facet_grid(Compartment ~ Site)
+```
+
+
+```{r}
+library(biobroom)
+library(edgeR)
+tidyDGEL <- function(x){
+  y = DGEList(counts = t(x %>% select(-Site, -SampleID)), group = x$Site)
+  return(y)
+}
+
+site_models_setup <- bind_rows(train_data, test_data) %>% 
+  select(SampleID, Age, Compartment, variable, value, Site, Season) %>% 
+  filter(Site == "Arbuckle" | Site == "Jonesboro") %>% 
+  filter(Season != 2015) %>% 
+  select(-Season) %>% 
+  filter(Compartment != "Bulk Soil") %>% 
+  group_by(Age, Compartment) %>% 
+  filter(nrow(table(Site)) > 1) %>% 
+  nest() %>% 
+  mutate(spread_data = map(data, ~(spread(., variable, value, fill = 0)))) %>% 
+  mutate(DGELists = map(spread_data, ~tidyDGEL(.)))
+
+site_models <- site_models_setup %>% 
+  mutate(DGELists = map(DGELists, ~calcNormFactors(.))) %>% 
+  mutate(DGELists = map(DGELists, ~estimateCommonDisp(.))) %>%
+  mutate(DGELists = map(DGELists, ~estimateTagwiseDisp(.))) %>%
+  mutate(results = map(DGELists, ~exactTest(.)))
+
+site_models_results <- site_models %>% 
+  unnest(map(results, ~tidy(.))) %>% 
+  group_by(Compartment) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+
+site_sigs <- site_models_results %>% 
+  filter(p.adj <= 0.05) %>% 
+  mutate(direction = ifelse(estimate < 0, "California", "Arkansas"))
+
+site_sigs %>% 
+  group_by(direction, Compartment, Age) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(Age, n, fill = direction)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_grid(.~Compartment) +
+  scale_fill_manual(values = c("steelblue", "#f57670ff")) +
+  labs(x = "Plant Age (Days)", y = "Number of OTUs") +
+  theme_minimal() +
+  theme(text = element_text(size = 12))
+
+site_sums <- bind_rows(train_data, test_data) %>% 
+  filter(Season == 2014 | Season == 2016) %>% 
+  inner_join(site_sigs %>% rename(variable = gene), by = c("variable", "Compartment", "Age")) %>% 
+  filter(direction == State) %>% 
+  group_by(SampleID, State, Compartment, Age) %>% 
+  summarise(total = sum(RA))
+
+site_sums %>% 
+  group_by(Compartment, State) %>% 
+  nest() %>% 
+  mutate(models = map(data, ~tidy(lm(total ~ Age,.)))) %>% 
+  unnest(models) %>% 
+  filter(term == "Age") %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+
+total_plot <- site_sums %>% 
+  group_by(State, Compartment, Age) %>% 
+  summarise(mean_total = mean(total/10), se = sd(total/10)/sqrt(n())) %>% ungroup() %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(x = Age, y = mean_total, fill = State)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = mean_total - se, ymax = mean_total + se), position = position_dodge(12.5), size = 0.5, width = 0.2) +
+  scale_fill_manual(values = c("steelblue", "#f57670ff")) +
+  facet_grid(.~Compartment) +
+  theme_minimal() +
+  labs(x = "", y = "") +
+  theme(text = element_text(size = 12), legend.position = "none")
+
+```
+
+
+Are early colonizing OTUs differentially abundant from the soil
+```{r}
+comp_lm_model <- bind_rows(train_data, test_data) %>% select(Age, Compartment, variable, log2value, Site, Season) %>% 
+  filter(Site == "Arbuckle" | Site == "Jonesboro") %>% 
+  inner_join(otu_directions_combo %>% ungroup() %>% rename(otu_compartment = Compartment), by = c("variable")) %>%
+  group_by(variable, classification, otu_compartment) %>% 
+  filter(Age < 49) %>% 
+  nest() %>% 
+  mutate(model = map(data, ~tidy(lm(log2value ~ Compartment, .)))) %>% 
+  unnest(model)
+  
+comp_lm_model_results <- comp_lm_model %>% 
+  filter(term != "(Intercept)") %>% 
+  group_by(otu_compartment) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon")) %>% 
+  mutate(term =  gsub("Compartment", "", term)) %>% 
+  filter(otu_compartment == term) %>% 
+  rename(Compartment = otu_compartment) %>% 
+  mutate(Enrichment = ifelse(estimate > 0, "Enriched", "Depleted")) %>% 
+  mutate(comp_classification = ifelse(p.adj > 0.05, "Neutral", Enrichment)) %>% 
+  rename(comp_estimate = estimate, comp_p.adj = p.adj)
+
+otu_directions_combo %>% 
+  rename(direction_estimate = estimate, direction_p.adj = p.adj) %>% 
+  inner_join(comp_lm_model_results, by = c("Compartment", "variable", "classification")) %>% 
+  #filter(classification != "Neutral") %>% 
+  mutate(sig = ifelse(comp_p.adj <= 0.05, "sig", "ns")) %>% 
+  group_by(classification) %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(direction_estimate, comp_estimate, color = classification, shape = sig)) +
+  geom_point(size = 3) +
+  scale_shape_manual(values = c(1, 16)) +
+  scale_color_manual(values = c("dodgerblue", "gold", "grey50")) +
+  facet_grid(.~Compartment, scales = "free_x") +
+  theme_minimal() +
+  labs(x = "Age slope estimate", y = "Log2 fold change from bulk soil") + 
+  theme(text = element_text(size = 12))
+  
+
+```
+
+
+```{r}
+library(broom)
+library(splines)
+model_data <- bind_rows(test_data, train_data) %>% 
+  filter(Site == "Arbuckle" & Season == 2014) %>% 
+  inner_join(otu_directions_combo %>% ungroup() %>% select(Compartment, variable, classification), by = c("variable", "Compartment"))
+
+mod <- ~glm(cbind(otu_total, depth_total - otu_total) ~ ns(Age, 4), ., family = "binomial")
+
+spline_predictions_rs <- model_data %>% 
+  group_by(Age, Compartment, variable) %>% 
+  summarise(depth_total = sum(Depth), otu_total = sum(value)) %>% 
+  mutate(percent = otu_total/depth_total) %>%
+  filter(Compartment == "Rhizosphere") %>% 
+  group_by(variable) %>% 
+  nest() %>% 
+  mutate(model = map(data, mod)) %>%
+  unnest(map2(model, data, augment, type.predict = "response"))
+
+peak_per_age_rs <- spline_predictions_rs %>%
+  group_by(variable) %>%
+  mutate(average = mean(.fitted)) %>% 
+  top_n(1, .fitted) %>%
+  ungroup() %>%
+  mutate(ratio = .fitted / average)
+  top_n(16, ratio)
+  filter(Age != min(Age), Age != max(Age))
+  
+spline_predictions_es <- model_data %>% 
+  group_by(Age, Compartment, variable) %>% 
+  summarise(depth_total = sum(Depth), otu_total = sum(value)) %>% 
+  mutate(percent = otu_total/depth_total) %>%
+  filter(Compartment == "Endosphere") %>% 
+  group_by(variable) %>% 
+  nest() %>% 
+  mutate(model = map(data, mod)) %>%
+  unnest(map2(model, data, augment, type.predict = "response"))
+
+peak_per_age_es <- spline_predictions_es %>%
+  group_by(variable) %>%
+  mutate(average = mean(.fitted)) %>% 
+  top_n(1, .fitted) %>%
+  ungroup() %>%
+  mutate(ratio = .fitted / average)
+  top_n(16, ratio)
+  filter(Age != min(Age), Age != max(Age))
+
+es_plot <- peak_per_age_es %>%
+  select(variable, peak = Age) %>%
+  inner_join(spline_predictions_es, by = "variable") %>%
+  inner_join(tax, by = "variable") %>% 
+  mutate(group_var = paste(variable, Family)) %>% 
+  group_by(variable) %>% 
+  mutate(scaled_percent = (percent - min(percent)) / (max(percent) - min(percent)),
+         scaled_fit = (.fitted - min(.fitted)) / (max(.fitted) - min(.fitted))) %>% 
+  ungroup() %>% 
+  mutate(variable = reorder(variable, peak)) %>% 
+  arrange(variable) %>% 
+  mutate(variable.f = reorder(as.character(variable), desc(variable))) %>% 
+  group_by(variable.f) %>%
+  nest(-variable.f) %>% 
+  mutate(order = (0:(nrow(.)-1))*0.5) %>% 
+  mutate(order2 = 1:nrow(.)) %>% 
+  unnest() %>% 
+  inner_join(otu_directions_combo %>% ungroup() %>% select(Compartment, classification, variable), by = c("variable", "Compartment")) %>% 
+  ggplot(aes(Age, scaled_percent, group = variable.f)) +
+  geom_ribbon(aes(ymin = order, ymax = order+scaled_percent, fill = classification), color = "white", size = 0.4) +
+  scale_y_continuous() +
+  expand_limits(y = 0) +
+  scale_fill_manual(values = c("dodgerblue", "gold", "grey50")) +
+  theme_minimal() +
+  labs(y = "") +
+  theme(legend.position = "none", axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,1,1,-0.5), units = "cm"))
+
+rs_plot <- peak_per_age_rs %>%
+  select(variable, peak = Age) %>%
+  inner_join(spline_predictions_rs, by = "variable") %>%
+  inner_join(tax, by = "variable") %>% 
+  mutate(group_var = paste(variable, Family)) %>% 
+  group_by(variable) %>% 
+  mutate(scaled_percent = (percent - min(percent)) / (max(percent) - min(percent)),
+         scaled_fit = (.fitted - min(.fitted)) / (max(.fitted) - min(.fitted))) %>% 
+  ungroup() %>% 
+  mutate(variable = reorder(variable, peak)) %>% 
+  arrange(variable) %>% 
+  mutate(variable.f = reorder(as.character(variable), desc(variable))) %>% 
+  group_by(variable.f) %>%
+  nest(-variable.f) %>% 
+  mutate(order = (0:(nrow(.)-1))*0.5) %>% 
+  mutate(order2 = 1:nrow(.)) %>% 
+  unnest() %>% 
+  inner_join(otu_directions_combo %>% ungroup() %>% select(Compartment, classification, variable), by = c("variable", "Compartment")) %>% 
+  ggplot(aes(Age, scaled_percent, group = variable.f)) +
+  geom_ribbon(aes(ymin = order, ymax = order+scaled_percent, fill = classification), color = "white", size = 0.4) +
+  scale_y_continuous() +
+  expand_limits(y = 0) +
+  scale_fill_manual(values = c("dodgerblue", "gold", "grey50")) +
+  theme_minimal() +
+  labs(y = "") +
+  theme(legend.position = "none", axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,-0.5,1,1), units = "cm"))
+
+grid.arrange(rs_plot, es_plot, nrow = 1)
+
+```
+
+```{r}
+phy_data <- bind_rows(test_data, train_data) %>% 
+  filter(Site == "Arbuckle" | Site == "Jonesboro") %>% 
+  inner_join(tax, by = "variable") %>% 
+  group_by(SampleID, Age, Compartment, level = paste(Order, Family)) %>% 
+  summarise(total = sum(RA))
+
+phy_data %>% 
+  #filter(Family != "unclassified") %>% 
+  group_by(Compartment, level) %>% 
+  summarise(mean = mean(total)) %>% 
+  top_n(3, mean)
+
+phy_data %>% 
+  group_by(Compartment, Family) %>% 
+  nest() %>% 
+  mutate(model = map(data, ~tidy(lm(log2(total + 1) ~ Age, .)))) %>% 
+  unnest(model) %>% 
+  filter(term != "(Intercept)") %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+  summarise(mean = mean(total)) %>% 
+  #filter(Family == "Myxococcaceae") %>% 
+  ggplot(aes(Age, mean, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(.~Compartment)
+```
+
+```{r}
+dt.table <- read.table("~/Google Drive/RMB/Analyses/LifeCycle/Data/DROUGHT/drought_otu_table.txt", header = T, row.names = 1)
+dt.map <- read.table("~/Google Drive/RMB/Analyses/LifeCycle/Data/DROUGHT/drought.map", header = T)
+org <- readRDS("~/RMB/Reference/organelle.rds")
+
+dt.table <- dt.table[!row.names(dt.table)%in%org,]
+dt.table <- dt.table[,match(dt.map$SampleID,colnames(dt.table))]
+
+absent_otus <- top_otus_combo$variable[!top_otus_combo$variable%in%row.names(dt.table)]
+
+absent_otus_df <- data.frame(matrix(0, nrow = length(absent_otus), ncol = ncol(dt.table)))
+row.names(absent_otus_df) <- absent_otus
+colnames(absent_otus_df) <- colnames(dt.table)
+
+dt.data <- melt(cbind(dt.map, t(rbind(dt.table, absent_otus_df))), id.vars = names(dt.map)) %>% 
+  select(-BarcodeSequence, -LinkerPrimerSequence)
+dt.data <- dt.data %>% 
+  group_by(SampleID) %>% 
+  mutate(depth = sum(value)) %>% 
+  mutate(RA = (value / depth) * 1000, log2value = log2(RA + 1))
+
+
+safe_predict <- possibly(predict, NA_real_)
+
+model_test_predictions_drought <- top_otus_combo %>% ungroup() %>% select(Compartment, variable) %>% 
+  left_join(dt.data, by = c("variable", "Compartment")) %>% 
+  select(SampleID, variable, Compartment, Soil, Cultivar, Treatment, log2value) %>% 
+  group_by(Compartment, Soil, SampleID, Cultivar, Treatment) %>% 
+  mutate(log2value = ifelse(is.na(log2value), 0, log2value)) %>% 
+  nest() %>% 
+  mutate(spread_data = map(data, ~(spread(., variable, log2value, fill = 0)))) %>% 
+  select(-data) %>% 
+  inner_join(rf_sparse_combo %>% ungroup() %>% select(Compartment, rf), by = "Compartment") %>% 
+  mutate(predictions = map2(rf, spread_data, safe_predict)) %>% 
+  mutate(model = Compartment) %>% 
+  unnest(predictions)
+
+model_test_predictions_drought %>% 
+  select(Compartment, SampleID, Soil, Cultivar, Treatment, predictions) %>% 
+  ungroup() %>% write_tsv(., "~/Google Drive/RMB/Analyses/LifeCycle/TABLES/drought_age_predictions.tsv")
+
+  
+dr_pred_plot <- model_test_predictions_drought %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(Soil, predictions, fill = Treatment)) +
+  #geom_hline(yintercept = 49, linetype = "dotted") +
+  geom_boxplot(outlier.size = 0.5, alpha = 1) +
+  facet_grid(.~Compartment) +
+  theme_minimal() +
+  scale_fill_manual(values = c("#D8B365", "#5AB4AC")) +
+  labs(x = "", y = "Microbiota Age (Days)") +
+  theme(text = element_text(size = 15), axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "none")
+```
+
+```{r}
+whole_anova <- aov(predictions ~ Compartment * Soil * Treatment, model_test_predictions_drought)
+tidy(TukeyHSD(whole_anova))
+tidy(whole_anova)
+
+
+model_test_predictions_drought %>% 
+  group_by(Compartment) %>% 
+  nest() %>% 
+  mutate(model = map(data, ~tidy(aov(predictions ~ Treatment, .)))) %>% 
+  unnest(model)
+
+model_test_predictions_drought %>% 
+  group_by(Compartment, Soil) %>%
+  nest() %>% 
+  mutate(model = map(data, ~tidy(aov(predictions ~ Treatment, .)))) %>% 
+  unnest(model)
+
+model_test_predictions_drought %>% 
+  group_by(Compartment, Soil) %>%
+  nest() %>% 
+  mutate(model = map(data, ~tidy(lm(predictions ~ Treatment, .)))) %>% 
+  unnest(model) %>% 
+  filter(term != "(Intercept)") %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+```
+
+```{r}
+model_test_predictions_drought %>% 
+  unnest(predictions) %>% 
+  group_by(Compartment, Soil) %>%
+  nest() %>% 
+  mutate(an = map(data, ~aov(predictions ~ Treatment * Cultivar, .))) %>% 
+  mutate(thst = map(an, ~tidy(TukeyHSD(.)))) %>% 
+  unnest(thst) %>% 
+  filter(adj.p.value <= 0.05)
+```
+
+```{r}
+dr_class_plot <- dt.data %>% 
+  inner_join(otu_directions_combo, by = c("variable", "Compartment")) %>% 
+  group_by(SampleID, classification, Treatment, Compartment, Soil) %>% 
+  summarise(total = sum(RA)) %>% 
+  group_by(classification, Treatment, Compartment, Soil) %>% 
+  mutate(mean_total = mean(total/ 10), se_total = sd(total/10) / sqrt(n())) %>% 
+  filter(Compartment == "Endosphere") %>% 
+  ungroup() %>% 
+  mutate(classification = fct_relevel(classification, "Decreasing", "Neutral", "Increasing")) %>% 
+  ggplot(aes(Soil, mean_total, fill = Treatment)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = mean_total - se_total, ymax = mean_total + se_total), position = position_dodge(width = 0.9), size = 0.25, width = 0.2) +
+  facet_wrap( ~ classification, scales = "free_y") +
+  scale_fill_manual(values = c("#D8B365", "#5AB4AC")) +
+  theme_minimal() +
+  labs(x = "", y = "Mean Relative Abundance (%)") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1), text = element_text(size = 15), legend.position = "none")
+
+grid.arrange(dr_pred_plot, dr_class_plot)
+```
+
+```{r}
+class_abund_tukey <- dt.data %>% 
+  inner_join(otu_directions_combo, by = c("variable", "Compartment")) %>% 
+  group_by(SampleID, classification, Treatment, Compartment, Soil) %>% 
+  summarise(total = sum(RA/10)) %>% 
+  group_by(Compartment, classification, Soil) %>% 
+  nest() %>% 
+  mutate(model = map(data, ~aov(total ~ Treatment,.))) %>% 
+  mutate(thsd = map(model, ~tidy(TukeyHSD(.)))) %>% 
+  unnest(thsd) %>% 
+  #filter(term != "(Intercept)") %>% 
+  #mutate(p.adj = p.adjust(p.value, "BH")) %>% 
+  filter(Compartment == "Endosphere") %>% 
+  select(-data, -model, -term)
+```
+
+
+
+

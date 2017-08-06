@@ -1,0 +1,10 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+setwd("~/Google Drive/RMB/Analyses/LifeCycle/")
+```
+

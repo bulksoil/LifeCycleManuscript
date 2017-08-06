@@ -1,0 +1,593 @@
+---
+title: "2016 Analysis"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(RColorBrewer)
+library(reshape2)
+library(forcats)
+library(broom)
+library(randomForest)
+```
+
+```{r}
+#data.2016 <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/lc_long_data.rds") %>% 
+#  filter(Season == 2016 & Site == "Arbuckle") %>% 
+#  mutate(RA = (value / Depth) * 1000)
+
+#write_rds(data.2016, "~/Google Drive/RMB/Analyses/LifeCycle/Data/arb_2016_data.rds")
+
+data.2016 <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/arb_2016_data.rds")
+tax <- readRDS("~/RMB/Reference/gg_otus_tax.rds")
+```
+
+```{r}
+long_pcoa <- function(x){
+  require(vegan)
+  x2 <- x %>% 
+    select(SampleID, variable, RA, Day_After_Germination, Compartment, Season, Genotype, Stage) %>% 
+    spread(variable, RA, fill = 0)
+  pc <- capscale(log2(x2[,7:ncol(x2)] + 1) ~ 1)
+  pc.axes <- bind_cols(x2[,1:5], as_tibble(scores(pc, choices = c(1:5))$sites))
+  pc.eig <- eigenvals(pc) / sum(eigenvals(pc))
+  pc.results <- list(axes = pc.axes, eig = pc.eig)
+  return(pc.results)
+}
+
+stage_CAP <- function(x){
+  require(vegan)
+  x2 <- x %>% 
+    select(SampleID, variable, RA, Day_After_Germination, Compartment, Season, Genotype, Stage) %>% 
+    spread(variable, RA, fill = 0)
+  pc <- capscale(log2(x2[,7:ncol(x2)] + 1) ~ Stage * Compartment, data = x2[,1:6])
+  pc.axes <- bind_cols(x2[,1:6], as_tibble(scores(pc, choices = c(1:5))$sites))
+  pc.eig <- eigenvals(pc) / sum(eigenvals(pc))
+  pc.results <- list(axes = pc.axes, eig = pc.eig)
+  return(pc.results)
+}
+
+long_adonis <- function(x, formula) {
+  x2 <- x %>% 
+    select(SampleID, variable, RA, Day_After_Germination, Compartment, Genotype, Stage) %>% 
+    spread(variable, RA, fill = 0)
+  wide_dat <- x2[,6:ncol(x2)]
+  temp_map <- x2[,1:5]
+  adonis(as.formula(paste("log2(wide_dat + 1) ~ ", formula, sep = "")), data = temp_map)
+}
+```
+
+```{r}
+whole_permanova <- long_adonis(data.2016 %>% ungroup(), formula = "Compartment * Day_After_Germination * Genotype * Stage")
+noBS_permanova <- long_adonis(data.2016 %>% ungroup() %>% filter(Compartment != "Bulk Soil"), formula = "Compartment * Day_After_Germination * Genotype * Stage")
+```
+
+
+```{r}
+arb2016.pc <- long_pcoa(data.2016 %>% ungroup())
+arb2016.CAP <- stage_CAP(data.2016 %>% ungroup())
+head(arb2016.pc$eig)
+```
+
+```{r}
+pc_plot <- arb2016.pc$axes %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  ggplot(aes(MDS1, MDS2, color = Day_After_Germination)) +
+  geom_point(alpha = 0.8) +
+  theme_minimal() +
+  scale_color_gradientn(colors = c("darkgreen", "darkolivegreen4", "darkgoldenrod1", "cornsilk")) +
+  labs(x = "PCo1 (28.2%)", y = "PCo2 (9.3%)") +
+  facet_grid(.~Compartment) +
+  theme(text = element_text(size = 12), legend.position = "none")
+
+arb2016.CAP$axes %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  ggplot(aes(CAP1, CAP2, color = Day_After_Germination)) +
+  geom_point(alpha = 0.8) +
+  theme_minimal() +
+  scale_color_gradientn(colors = c("darkgreen", "darkolivegreen4", "darkgoldenrod1", "cornsilk")) +
+  labs(x = "PCo1 (28.2%)", y = "PCo2 (9.3%)") +
+  facet_grid(.~Compartment) +
+  theme(text = element_text(size = 12), legend.position = "none")
+```
+
+```{r}
+arb2016.pc$axes %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  group_by(Compartment) %>%
+  filter(Compartment != "Bulk Soil") %>% 
+  nest() %>% 
+  mutate(model = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2) * Genotype, .)),
+         null_mod = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2) + Genotype, .))) %>% 
+  unnest(map2(model, null_mod, anova)) %>% 
+  na.omit()
+  
+axis.model <- arb2016.pc$axes %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  group_by(Compartment) %>%
+  filter(Compartment != "Bulk Soil") %>% 
+  nest() %>% 
+  mutate(model = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2) * Genotype, .)),
+         null_mod = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2) + Genotype, .))) %>% 
+  unnest(map(model, ~tidy(.))) %>% 
+  group_by(Compartment) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+
+axis.model.soil <- arb2016.pc$axes %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  group_by(Compartment) %>%
+  filter(Compartment == "Bulk Soil") %>%
+  nest() %>% 
+  mutate(model = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2), .))) %>% 
+  unnest(map(model, ~tidy(.)))
+
+kit_estimates <- axis.model %>% filter(term == "ns(Day_After_Germination, 2)1") %>% 
+  select(Compartment, estimate, std.error) %>% 
+  mutate(Genotype = "Kitaake")
+
+axis.model %>% 
+  filter(grepl("1:", term)) %>% 
+  mutate(Genotype = gsub(".*Genotype", "", term)) %>% 
+  select(Compartment, Genotype, estimate, std.error) %>% 
+  bind_rows(kit_estimates) %>% 
+  rename(geno_change = estimate) %>% 
+  inner_join(kit_estimates %>% select(Compartment, estimate), by = "Compartment") %>% 
+  mutate(new_estimate = ifelse(Genotype != "Kitaake", estimate + geno_change, estimate)) %>% 
+  bind_rows(axis.model.soil %>% filter(term == "ns(Day_After_Germination, 2)1") %>% rename(new_estimate = estimate) %>%  mutate(Genotype = "Soil")) %>% 
+  ggplot(aes(Genotype, new_estimate, color = Genotype)) +
+  geom_errorbar(aes(ymin = new_estimate - std.error, ymax = new_estimate + std.error), width = 0.2, size = .2, color = "black") +
+  geom_point() +
+  scale_color_manual(values = c(brewer.pal(4, "PuOr"), "grey50")) +
+  facet_grid(.~Compartment, scales = "free_x") +
+  theme_minimal() +
+  labs(x = "", y = "Linear Slope Estimate") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+```
+
+
+
+
+```{r}
+rf_directions <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/otu_directions.rds")
+```
+
+```{r}
+directions2016 <- data.2016 %>% 
+  inner_join(rf_directions %>% ungroup() %>% select(Compartment, variable, classification), by = c("variable", "Compartment")) %>% 
+  group_by(SampleID, classification, Compartment, Day_After_Germination, Genotype) %>% 
+  summarise(total = sum(RA))
+
+directions2016 %>% 
+  filter(classification != "Neutral") %>% ungroup() %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  group_by(Day_After_Germination, Genotype, Compartment, classification) %>% 
+  summarise(mean_ab = mean(total / 10), se = sd(total / 10) / sqrt(n())) %>% 
+  ggplot(aes(Day_After_Germination, mean_ab, color = Genotype, linetype = classification)) +
+  geom_line() +
+  geom_errorbar(aes(ymin = mean_ab - se, ymax = mean_ab + se), size = 0.5, width = 0.2) +
+  facet_wrap(~ Compartment, scales = "free_y") +
+  theme_minimal() +
+  scale_color_brewer(palette = "PuOr") +
+  labs(x = "Chronological Age (Days)", y = "Mean Total Relative Abundance (%)") +
+  theme(text = element_text(size = 12), legend.position = "none")
+
+directions2016 %>% 
+  group_by(Day_After_Germination, Genotype, Compartment, classification) %>% 
+  summarise(mean_ab = mean(total / 10), se = sd(total / 10) / sqrt(n())) %>% 
+  filter(classification == "Neutral") %>% 
+  ggplot(aes(Day_After_Germination, mean_ab, color = classification)) +
+  geom_line() +
+  geom_errorbar(aes(ymin = mean_ab - se, ymax = mean_ab + se), size = 0.5, width = 0.2) +
+  facet_grid(Compartment ~ Genotype, scales = "free_y") +
+  theme_minimal() +
+  scale_color_manual(values = c("dodgerblue", "gold"))
+
+direction_mods <- directions2016 %>% group_by(classification, Compartment) %>% 
+  #mutate(Genotype = fct_relevel(Genotype, "M206", "Kitaake", "M401", "Nipponbare")) %>% 
+  nest() %>% 
+  mutate(mod1 = map(data, ~lm(total ~ ns(Day_After_Germination, 3)*Genotype, .)),
+         null_model = map(data, ~lm(total ~ ns(Day_After_Germination, 3), .)))
+
+direction_mods %>% 
+  unnest(map2(mod1, null_model, anova))
+
+direction_mods %>% 
+  unnest(map(mod1, ~tidy(.))) %>% 
+  filter(grepl("Genotype", term)) %>% 
+  filter(grepl("3:", term)) %>% 
+  group_by(Compartment) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+```
+
+```{r}
+safe_predict <- possibly(predict, NA_real_)
+rf_sparse_combo <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/rf_sparse_combo.rds")
+
+model_test_predictions_combo <- data.2016 %>% ungroup() %>% 
+  mutate(log2value = log2(RA + 1)) %>% 
+  inner_join(rf_directions %>% ungroup() %>% select(Compartment, variable), by = c("variable", "Compartment")) %>% 
+  select(SampleID, Day_After_Germination, variable, log2value, Compartment, Genotype) %>% 
+  group_by(Compartment, SampleID, Day_After_Germination, Genotype) %>% 
+  mutate(log2value = ifelse(is.na(log2value), 0, log2value)) %>% 
+  nest() %>% 
+  mutate(spread_data = map(data, ~(spread(., variable, log2value, fill = 0)))) %>% 
+  select(-data) %>% 
+  inner_join(rf_sparse_combo %>% ungroup() %>% select(Compartment, rf), by = "Compartment") %>% 
+  mutate(predictions = map2(rf, spread_data, safe_predict)) %>% 
+  mutate(model = Compartment)
+
+model_test_predictions_combo %>% 
+  unnest(predictions) %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  ggplot(aes(x = Day_After_Germination, predictions, color = Genotype)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted") +
+  geom_point(alpha = 0.5) +
+  geom_smooth(se = F) +
+  scale_color_brewer(palette = "PuOr") +
+  facet_grid(.~Compartment) +
+  theme_minimal() +
+  coord_fixed()
+
+age_models <- model_test_predictions_combo %>% 
+  unnest(predictions) %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
+  mutate(Genotype = fct_relevel(Genotype, "M401", "Kitaake", "M206", "Nipponbare")) %>% 
+  group_by(Compartment) %>% 
+  nest() %>% 
+  mutate(mod1 = map(data, ~lm(predictions ~ ns(Day_After_Germination, 3) + Genotype, .)),
+         null_model = map(data, ~lm(predictions ~ ns(Day_After_Germination, 3), .)))
+
+age_models %>% 
+  unnest(map2(mod1, null_model, anova))
+
+age_models %>% 
+  unnest(map(mod1, ~tidy(.))) %>% 
+  filter(Compartment == "Endosphere") %>% 
+  filter(grepl("Geno", term)) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon"))
+
+```
+
+```{r}
+stage_numbers <- data.frame(Stage = c(paste("V", 1:12, sep = ""), paste("R", 0:9, sep = ""), "Senescent", "Soil"),
+                            stage_number = 5:28)
+train_data <- data.2016 %>% ungroup() %>% 
+  inner_join(stage_numbers, by = "Stage") %>% 
+  filter(Compartment != "Bulk Soil") %>% 
+  group_by(SampleID, Compartment, Stage) %>% 
+  nest() %>% 
+  sample_frac(0.5) %>% 
+  mutate(type = "train") %>% 
+  unnest() %>% 
+  mutate(log2value = log2(RA + 1))
+
+test_data <- data.2016 %>% ungroup() %>% 
+  inner_join(stage_numbers, by = "Stage") %>%  
+  filter(Compartment != "Bulk Soil") %>% 
+  anti_join(train_data %>% ungroup() %>% select(Compartment, SampleID), by = "SampleID") %>% 
+  mutate(type = "test") %>% 
+  mutate(log2value = log2(RA + 1))
+
+write_rds(train_data, path = "~/Google Drive/RMB/Analyses/LifeCycle/Data/stage_train.rds")
+write_rds(test_data, path = "~/Google Drive/RMB/Analyses/LifeCycle/Data/stage_test.rds")
+
+train_data <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/stage_train.rds")
+test_data <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/stage_test.rds")
+```
+
+```{r}
+table(train_data$stage_number)
+```
+
+```{r}
+rfcv_tidy_stage <- function(x){
+  cv <- rfcv(x[,3:ncol(x)], x$stage_number, cv.fold = 10, log = T)
+  paste(names(cv$error), cv$error, sep = "_")
+}
+
+get_importance_stage <- function(x){
+  rf <- randomForest(x[,3:ncol(x)], x$stage_number, importance = T)
+  imps <- as.data.frame(rf$importance)
+  imps$variable <- row.names(imps)
+  names(imps)[1] <- "PercIncMSE"
+  as_tibble(imps)
+}
+
+tidy_randomforest_stage <- function(x) {
+  randomForest(x[,3:ncol(x)], x$stage_number, importance = F, keep.forest = T)
+}
+
+tidy_predict_stage <- function(model, data) {
+  predict(model, data[,3:ncol(data)])
+}
+```
+
+```{r}
+cvs <- train_data %>% 
+  group_by(variable) %>% 
+  filter(sum(value > 0) / n() > 0.25) %>% 
+  select(SampleID, Compartment, stage_number, variable, log2value) %>% 
+  spread(variable, log2value, fill = 0) %>% 
+  group_by(Compartment) %>% 
+  nest() %>% 
+  mutate(cv = map(data, ~rfcv_tidy_stage(.)))
+
+cvs %>% 
+  unnest(cv) %>% 
+  separate(cv, c("OTUs", "Error"), "_", convert = T) %>% 
+  ggplot(aes(OTUs, Error, color = Compartment)) +
+  geom_line() +
+  scale_x_log10()
+```
+
+```{r}
+important_otus <- train_data %>% 
+  group_by(variable) %>% 
+  filter(sum(value > 0) / n() > 0.25) %>% 
+  select(SampleID, Compartment, stage_number, variable, log2value) %>% 
+  spread(variable, log2value, fill = 0) %>% 
+  group_by(Compartment) %>% 
+  nest() %>% 
+  mutate(importance = map(data, ~get_importance_stage(.)))
+
+top_otus <- important_otus %>% unnest(importance) %>% 
+  group_by(Compartment) %>% 
+  top_n(54, PercIncMSE)
+```
+```{r}
+stage_sparse_rf <- train_data %>% 
+  inner_join(top_otus, by = c("Compartment", "variable")) %>% 
+  select(SampleID, Compartment, stage_number, variable, log2value) %>% 
+  group_by(Compartment) %>%
+  nest(., .key = "train_data") %>% 
+  mutate(train_spread_data = map(train_data, ~spread(., variable, log2value, fill = 0))) %>% 
+  mutate(rf = map(train_spread_data, ~tidy_randomforest_stage(.)))
+
+write_rds(stage_sparse_rf, path = "~/Google Drive/RMB/Analyses/LifeCycle/Data/stage_sparse_rf.rds")
+stage_sparse_rf <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/stage_sparse_rf.rds")
+
+top_otus <- stage_sparse_rf %>% 
+  mutate(importance = map(rf, ~get_importance(.))) %>% 
+  unnest(importance)
+
+stage_predictions <- bind_rows(train_data, test_data) %>% 
+  inner_join(top_otus %>% ungroup() %>% select(Compartment, variable), by = c("variable", "Compartment")) %>% 
+  select(SampleID, Day_After_Germination, variable, log2value, Compartment, type, Genotype, stage_number) %>% 
+  group_by(Compartment, Day_After_Germination, type, Genotype, SampleID, stage_number) %>% 
+  mutate(log2value = ifelse(is.na(log2value), 0, log2value)) %>% 
+  nest() %>% 
+  mutate(spread_data = map(data, ~(spread(., variable, log2value, fill = 0)))) %>% 
+  select(-data) %>% 
+  inner_join(stage_sparse_rf %>% ungroup() %>% select(Compartment, rf), by = "Compartment") %>% 
+  mutate(predictions = map2(rf, spread_data, safe_predict))
+
+pred_plot <- stage_predictions %>% unnest(predictions) %>% ungroup() %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  ggplot(aes(Day_After_Germination + 7, predictions, color = Genotype, fill = Genotype)) +
+  geom_point(alpha = 0.5, size = 0.5) +
+  geom_smooth(size = 0.5, method = "lm", formula = y~ns(x, 2)) +
+  scale_color_brewer(palette = "PuOr") +
+  scale_fill_brewer(palette = "PuOr") +
+  facet_grid(.~Compartment) +
+  theme_minimal() +
+  labs(x = "Chronological Age (Days)") +
+  theme(legend.position = "none")
+```
+```{r}
+library(splines)
+stage_aov <- stage_predictions %>% unnest(predictions) %>% ungroup() %>%
+  group_by(Compartment) %>% 
+  nest() %>% 
+  mutate(mod1 = map(data, ~lm(predictions ~ ns(Day_After_Germination, 2)*Genotype, .)),
+         null_mod = map(data, ~lm(predictions ~ ns(Day_After_Germination, 2) + Genotype, .)))
+
+stage_aov %>% 
+  unnest(map2(null_mod, mod1, anova))
+
+stage_aov %>% 
+  unnest(map(mod1, ~tidy(.))) %>% 
+  filter(grepl("Genotype", term)) %>% 
+  filter(grepl("1:", term)) %>% 
+  group_by(Compartment) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon")) %>% 
+  filter(p.adj <= 0.05)
+```
+
+
+```{r}
+otu_directions <- bind_rows(train_data, test_data) %>% 
+  inner_join(top_otus %>% ungroup() %>% select(Compartment, variable), by = c("Compartment", "variable")) %>% 
+  group_by(variable, Compartment) %>% 
+  nest() %>% 
+  mutate(model = map(data, ~tidy(lm(log2value ~ Day_After_Germination, .)))) %>% 
+  unnest(model) %>% 
+  filter(term != "(Intercept)") %>% 
+  group_by(Compartment) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon")) %>% 
+  mutate(direction = ifelse(estimate > 0, "Increasing", "Decreasing")) %>% 
+  mutate(classification = ifelse(p.adj > 0.05, "Neutral", direction))
+
+
+otu_directions %>% 
+  group_by(classification, variable) %>% 
+  summarise(in_common = n()) %>% 
+  arrange(-in_common)
+```
+
+```{r}
+otu_directions %>% 
+  inner_join(tax, by = "variable") %>% 
+  ungroup() %>% 
+  mutate(classification = fct_relevel(classification, "Decreasing", "Neutral", "Increasing")) %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  ggplot(aes(Phylum2, fill = Order)) +
+  geom_bar() +
+  facet_grid(Compartment ~ classification) +
+  coord_flip()
+
+otu_class_abund <- bind_rows(train_data, test_data) %>% 
+  inner_join(otu_directions %>% ungroup() %>% select(classification, Compartment, variable), by = c("Compartment", "variable")) %>% 
+  group_by(Compartment, Day_After_Germination, classification, SampleID, Genotype, stage_number) %>% 
+  summarise(total = sum(RA))
+
+abund_plot <- otu_class_abund %>% ungroup() %>% 
+  filter(classification != "Neutral") %>% 
+  mutate(Compartment  = fct_relevel(Compartment, "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
+  ggplot(aes(Day_After_Germination+ 7, total / 10, color = Genotype, linetype = classification)) +
+  geom_smooth(se = F, size = 0.5) +
+  facet_wrap(~Compartment, nrow = 1) +
+  scale_color_brewer(palette = "PuOr") +
+  theme_minimal() +
+  labs(x = "Chronological Age (Days)") +
+  theme(legend.position = "none")
+```
+```{r}
+dev_stage_abund_mod <- otu_class_abund %>% 
+  group_by(classification) %>% 
+  nest() %>% 
+  mutate(mod1 = map(data, ~lm(total ~ ns(Day_After_Germination, 2)*Genotype, .)),
+         null_mod = map(data, ~lm(total ~ ns(Day_After_Germination, 2)+Genotype, .)))
+
+dev_stage_abund_mod %>% 
+  unnest(map2(null_mod, mod1, anova)) %>% 
+  na.omit()
+
+summary(aov(log2(total + 1) ~ Compartment + classification + Day_After_Germination * Genotype, data= otu_class_abund))
+```
+
+
+```{r}
+peak_data <- bind_rows(train_data, test_data) %>%  
+  inner_join(otu_directions %>% ungroup() %>% select(classification, Compartment, variable), by = c("Compartment", "variable"))
+  #group_by(Compartment, Genotype, Day_After_Germination, variable, classification) %>% 
+  #summarise(total = sum(value), total_depth = sum(Depth))
+
+spline_model <- ~glm(cbind(value, Depth - value) ~ ns(Day_After_Germination, 3), ., family = "binomial")
+
+spline_data <- peak_data %>% 
+  group_by(variable, Compartment, Genotype, classification) %>% 
+  nest() %>% 
+  mutate(model = map(data, spline_model)) %>% 
+  unnest(map2(model, data, augment, type.predict = "response"))
+
+peaks <- spline_data %>% 
+  group_by(Compartment, Genotype, classification, variable) %>% 
+  top_n(1, .fitted) %>% 
+  group_by(Compartment, Genotype, classification, variable, Day_After_Germination) %>% 
+  filter(row_number() == 1)
+
+peaks2 <- peak_data %>% 
+  group_by(classification, Day_After_Germination, variable, Compartment, Genotype) %>% 
+  summarise(mean = mean(value / Depth)) %>% 
+  group_by(variable, Compartment, variable, Genotype, classification) %>% 
+  filter(mean == max(mean))
+
+kit_peaks <- peaks %>% filter(Genotype == "Kitaake")
+
+peaks %>% 
+  inner_join(kit_peaks %>% ungroup() %>% select(-Genotype) %>% rename(Kit_Peak = Day_After_Germination), by = c("Compartment", "classification", "variable")) %>% 
+  #filter(classification == "Increasing") %>% 
+  mutate(delta_peak = Day_After_Germination - Kit_Peak) %>% 
+  select(variable, Compartment, Genotype, classification, delta_peak) %>% 
+  filter(Genotype != "Kitaake") %>% 
+  group_by(Genotype, Compartment, classification) %>% 
+  summarise(mean = mean(delta_peak), se = sd(delta_peak) / sqrt(n())) %>% 
+  filter(classification != "Neutral") %>% 
+  ggplot(aes(Compartment, mean, fill = Genotype)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), position = position_dodge(width = 0.9), size = 0.2, width = 0.2) +
+  facet_grid(.~classification)
+
+peaks %>% 
+  #inner_join(kit_peaks %>% ungroup() %>% select(-Genotype) %>% rename(Kit_Peak = Day_After_Germination), by = c("Compartment", "classification", "variable")) %>% 
+  #filter(classification == "Increasing") %>% 
+  #mutate(delta_peak = Day_After_Germination - Kit_Peak) %>% 
+  select(variable, Compartment, Genotype, classification, Day_After_Germination) %>% 
+  filter(Genotype != "Kitaake") %>% 
+  group_by(Compartment, classification) %>%
+  nest() %>% 
+  mutate(model = map(data, ~tidy(aov(Day_After_Germination ~ Genotype, .)))) %>% 
+  unnest(model) %>% 
+  filter(term == "Genotype") %>% 
+  filter(classification != "Neutral")
+
+peaks2 %>% 
+  ggplot(aes(Day_After_Germination, fill = Genotype)) +
+  geom_density(alpha = 0.5, adjust = 2) +
+  facet_grid(classification~Compartment) +
+  scale_fill_brewer(palette = "PuOr") +
+  theme_minimal()
+
+peaks2 %>% 
+  group_by(variable, classification, Compartment) %>% 
+  arrange(Day_After_Germination) %>% 
+  mutate(rank = 1:n()) %>% 
+  filter(paste(Genotype, rank) == "Kitaake 1")
+
+peaks2 %>% 
+  #inner_join(kit_peaks %>% ungroup() %>% select(-Genotype) %>% rename(Kit_Peak = Day_After_Germination), by = c("Compartment", "classification", "variable")) %>% 
+  #filter(classification == "Increasing") %>% 
+  #mutate(delta_peak = Day_After_Germination - Kit_Peak) %>% 
+  select(variable, Compartment, Genotype, classification, Day_After_Germination) %>% 
+  filter(Genotype != "Kitaake") %>% 
+  group_by(Compartment, classification) %>%
+  nest() %>% 
+  mutate(model = map(data, ~aov(Day_After_Germination ~ Genotype, .)),
+         null_model = map(data, ~aov(Day_After_Germination ~ 1, .))) %>% 
+  unnest(map2(model, null_model, anova)) %>% 
+  filter(classification != "Neutral") %>% 
+  na.omit()
+
+peaks2 %>% 
+  #inner_join(kit_peaks %>% ungroup() %>% select(-Genotype) %>% rename(Kit_Peak = Day_After_Germination), by = c("Compartment", "classification", "variable")) %>% 
+  #filter(classification == "Increasing") %>% 
+  #mutate(delta_peak = Day_After_Germination - Kit_Peak) %>% 
+  #select(variable, Compartment, Genotype, classification, delta_peak) %>% 
+  #filter(Genotype != "Kitaake") %>% 
+  group_by(Compartment, classification) %>%
+  nest() %>% 
+  mutate(model = map(data, ~aov(Day_After_Germination ~ Genotype, .))) %>%
+  #unnest(map(model, ~tidy(.)))
+  unnest(map(model, ~tidy(TukeyHSD(.)))) %>% 
+  filter(adj.p.value <= 0.05) %>% 
+  filter(term == "Genotype") %>% 
+  filter(classification != "Neutral")
+  
+spline_data %>% 
+  filter(variable == "783719") %>% 
+  ggplot(aes(Day_After_Germination, .fitted, color = Genotype, group = Genotype)) +
+  geom_line() +
+  facet_grid(.~Compartment) +
+  geom_point(aes(x = Day_After_Germination, value/Depth, group = Genotype))
+```
+
+```{r}
+data.2016 %>% 
+  filter(Compartment == "Endosphere") %>% mutate(Day_After_Germination = Day_After_Germination + 7) %>% 
+  group_by(Genotype, Stage, Day_After_Germination) %>% 
+  summarise(number = n()) %>% ungroup() %>%
+  bind_rows(as_tibble(data.frame(Genotype = "Nipponbare", Stage = "V1", Day_After_Germination = 14, number = 10))) %>% 
+  inner_join(stage_numbers, by = "Stage") %>% 
+  mutate(Stage = fct_reorder(Stage, stage_number)) %>% 
+  ggplot(aes(Day_After_Germination, stage_number, color = Genotype, linetype = Genotype)) +
+  geom_line(size = 1) +
+  geom_point(color = 'black') +
+  #geom_smooth(se = F)+
+  #geom_smooth(se = F, method = "loess") +
+  #geom_vline(aes(xintercept = Day_After_Germination)) +
+  scale_color_brewer(palette = "PuOr") +
+  theme_bw() +
+  scale_y_continuous(breaks = seq(5, 27, 1), labels = as.character(stage_numbers$Stage[-nrow(stage_numbers)])) +
+  labs(x = "Plant Age (Days)", y = "Developmental Stage") +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+data.2016 %>% group_by(SampleID) %>% summarise(n()) %>% write_tsv("~/Google Drive/RMB/Analyses/LifeCycle/Data/good_samples16.tsv")
+```
+
+
+
