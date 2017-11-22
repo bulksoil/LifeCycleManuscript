@@ -20,7 +20,9 @@ library(randomForest)
 
 #write_rds(data.2016, "~/Google Drive/RMB/Analyses/LifeCycle/Data/arb_2016_data.rds")
 
-data.2016 <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/arb_2016_data.rds")
+data.2016 <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/cal_2016.rds")
+runs <- read.table("~/Google Drive/RMB/Analyses/LifeCycle/TABLES/Runs.txt", header = T)
+data.2016 <- data.2016 %>% inner_join(runs, by = "SampleID")
 tax <- readRDS("~/RMB/Reference/gg_otus_tax.rds")
 ```
 
@@ -31,7 +33,7 @@ long_pcoa <- function(x){
     select(SampleID, variable, RA, Day_After_Germination, Compartment, Season, Genotype, Stage) %>% 
     spread(variable, RA, fill = 0)
   pc <- capscale(log2(x2[,7:ncol(x2)] + 1) ~ 1)
-  pc.axes <- bind_cols(x2[,1:5], as_tibble(scores(pc, choices = c(1:5))$sites))
+  pc.axes <- bind_cols(x2[,1:6], as_tibble(scores(pc, choices = c(1:5))$sites))
   pc.eig <- eigenvals(pc) / sum(eigenvals(pc))
   pc.results <- list(axes = pc.axes, eig = pc.eig)
   return(pc.results)
@@ -57,13 +59,30 @@ long_adonis <- function(x, formula) {
   temp_map <- x2[,1:5]
   adonis(as.formula(paste("log2(wide_dat + 1) ~ ", formula, sep = "")), data = temp_map)
 }
+
+long_cap <- function(x, formula) {
+  x2 <- x %>% 
+    select(SampleID, variable, RA, Day_After_Germination, Compartment, Site, Stage, Genotype, MiSeqRun) %>% 
+    spread(variable, RA, fill = 0)
+  wide_dat <- x2[,7:ncol(x2)]
+  temp_map <- x2[,1:7]
+  capscale(as.formula(paste("log2(wide_dat + 1) ~ ", formula, sep = "")), data = temp_map)
+}
 ```
 
 ```{r}
 whole_permanova <- long_adonis(data.2016 %>% ungroup(), formula = "Compartment * Day_After_Germination * Genotype * Stage")
+whole_cap <- long_cap(data.2016 %>% ungroup(), formula = "Compartment * Day_After_Germination * Genotype * Stage + Condition(MiSeqRun)")
+whole_cap_anova <- anova(whole_cap, by = "terms")
 noBS_permanova <- long_adonis(data.2016 %>% ungroup() %>% filter(Compartment != "Bulk Soil"), formula = "Compartment * Day_After_Germination * Genotype * Stage")
 ```
 
+```{r}
+m206v401permanovaPRE <- long_adonis(data.2016 %>% ungroup() %>% filter(Genotype == "M401" | Genotype == "M206") %>% filter(Day_After_Germination <= 63), 
+                                    formula = "Compartment * Day_After_Germination + Genotype")
+m206v401permanovaPOST <- long_adonis(data.2016 %>% ungroup() %>% filter(Genotype == "M206" | Genotype == "M401") %>% filter(Day_After_Germination > 63), 
+                                    formula = "Compartment * Day_After_Germination + Genotype")
+```
 
 ```{r}
 arb2016.pc <- long_pcoa(data.2016 %>% ungroup())
@@ -93,60 +112,79 @@ arb2016.CAP$axes %>%
   theme(text = element_text(size = 12), legend.position = "none")
 ```
 
+
+
 ```{r}
-arb2016.pc$axes %>% 
-  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
-  group_by(Compartment) %>%
+m <- arb2016.pc$axes %>% 
+  group_by(half = ifelse(Day_After_Germination <= 77, "pre77", "post77"), Compartment) %>% 
   filter(Compartment != "Bulk Soil") %>% 
   nest() %>% 
-  mutate(model = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2) * Genotype, .)),
-         null_mod = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2) + Genotype, .))) %>% 
-  unnest(map2(model, null_mod, anova)) %>% 
-  na.omit()
-  
-axis.model <- arb2016.pc$axes %>% 
-  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
-  group_by(Compartment) %>%
-  filter(Compartment != "Bulk Soil") %>% 
-  nest() %>% 
-  mutate(model = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2) * Genotype, .)),
-         null_mod = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2) + Genotype, .))) %>% 
-  unnest(map(model, ~tidy(.))) %>% 
-  group_by(Compartment) %>% 
-  mutate(p.adj = p.adjust(p.value, "bon"))
+  mutate(model = map(data, ~lm(MDS2 ~ Genotype * Day_After_Germination, .)),
+         null_model = map(data, ~lm(MDS2 ~ Genotype + Day_After_Germination, .)),
+         model3 = map(data, ~lm(MDS2 ~ Day_After_Germination, .)))
+
+m %>% unnest(map2(model, null_model, anova)) %>% na.omit() %>% arrange(half)
+m %>% unnest(map2(model3, null_model, anova)) %>% na.omit() %>% arrange(half)
+
+m %>% unnest(map(model, ~augment(.))) %>% 
+  ggplot(aes(.resid)) +
+  geom_histogram() +
+  facet_grid(half ~ Compartment)
+
+m %>% 
+  unnest(map(model, ~broom::tidy(.))) %>% 
+  group_by(Compartment, half) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon")) %>% write_tsv("~/Google Drive/RMB/Analyses/LifeCycle/TABLES/arb2016_PC2.tsv") 
+  filter(half == "pre77" & Compartment != "Rhizoplane") %>% 
+  filter(grepl(":", term))
 
 axis.model.soil <- arb2016.pc$axes %>% 
   mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
   group_by(Compartment) %>%
   filter(Compartment == "Bulk Soil") %>%
   nest() %>% 
-  mutate(model = map(data, ~lm(MDS2 ~ ns(Day_After_Germination, 2), .))) %>% 
+  mutate(model = map(data, ~lm(MDS2 ~ Day_After_Germination, .))) %>% 
   unnest(map(model, ~tidy(.)))
 
-kit_estimates <- axis.model %>% filter(term == "ns(Day_After_Germination, 2)1") %>% 
-  select(Compartment, estimate, std.error) %>% 
+kit_estimates <- m %>% 
+  unnest(map(model, ~tidy(.))) %>% 
+  filter(term == "Day_After_Germination") %>% 
+  select(Compartment, estimate, std.error, half) %>% 
   mutate(Genotype = "Kitaake")
 
-axis.model %>% 
-  filter(grepl("1:", term)) %>% 
-  mutate(Genotype = gsub(".*Genotype", "", term)) %>% 
-  select(Compartment, Genotype, estimate, std.error) %>% 
+m %>% 
+  filter(Compartment != "Rhizoplane") %>% 
+  unnest(map(model, ~tidy(.))) %>%
+  filter(grepl(":", term)) %>% 
+  mutate(Genotype = gsub(".*Genotype|:Day_After_Germination", "", term)) %>% 
+  select(Compartment, Genotype, estimate, std.error, half) %>% 
   bind_rows(kit_estimates) %>% 
   rename(geno_change = estimate) %>% 
-  inner_join(kit_estimates %>% select(Compartment, estimate), by = "Compartment") %>% 
+  inner_join(kit_estimates %>% filter(Compartment != "Rhizoplane") %>% select(Compartment, estimate, half), by = c("Compartment", "half")) %>% 
   mutate(new_estimate = ifelse(Genotype != "Kitaake", estimate + geno_change, estimate)) %>% 
-  bind_rows(axis.model.soil %>% filter(term == "ns(Day_After_Germination, 2)1") %>% rename(new_estimate = estimate) %>%  mutate(Genotype = "Soil")) %>% 
+  bind_rows(axis.model.soil %>% filter(term == "Day_After_Germination") %>% rename(new_estimate = estimate) %>%  mutate(Genotype = "Soil")) %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Endosphere")) %>% 
+  mutate(half = fct_relevel(half, "pre", "post")) %>% 
   ggplot(aes(Genotype, new_estimate, color = Genotype)) +
   geom_errorbar(aes(ymin = new_estimate - std.error, ymax = new_estimate + std.error), width = 0.2, size = .2, color = "black") +
   geom_point() +
   scale_color_manual(values = c(brewer.pal(4, "PuOr"), "grey50")) +
-  facet_grid(.~Compartment, scales = "free_x") +
+  facet_grid(.~Compartment + half, scales = "free_x") +
   theme_minimal() +
   labs(x = "", y = "Linear Slope Estimate") +
   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
 ```
 
-
+```{r}
+arb2016.pc$axes %>% 
+  group_by(Compartment, Genotype, half = ifelse(Day_After_Germination <= 77, "pre", "post")) %>% 
+  filter(Compartment != "Bulk Soil") %>% 
+  nest() %>% 
+  mutate(model = map(data, ~lm(MDS2 ~ Day_After_Germination, .))) %>% 
+  unnest(map(model, ~tidy(.))) %>% 
+  mutate(p.adj = p.adjust(p.value, "bon")) %>% 
+  filter(half == "pre", term == "Day_After_Germination")
+```
 
 
 ```{r}

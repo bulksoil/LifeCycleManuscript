@@ -351,12 +351,17 @@ cvs_combo <- train_data %>%
   mutate(cv = map(data, ~rfcv_tidy_age(.)))
 
 cvs_combo %>% 
+  filter(Compartment != "Rhizoplane") %>% 
   unnest(cv) %>% 
   separate(cv, c("OTUs", "Error"), "_", convert = T) %>% 
-  ggplot(aes(OTUs, Error)) +
-  geom_line() +
-  facet_grid(.~Compartment) +
-  scale_x_log10()
+  ggplot(aes(OTUs, Error, color = Compartment)) +
+  geom_vline(xintercept = 85, linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("#377EB8", "#984EA3")) +
+  scale_x_log10() +
+  theme_minimal() +
+  labs(x = "Number of OTUs included in model", y = "Cross-validation error") +
+  theme(text = element_text(size = 12))
 
 cvs_combo %>% 
   unnest(cv) %>% 
@@ -420,7 +425,7 @@ rf_sparse_combo %>%
 rf_sparse_combo <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/RF/rf_sparse_combo.rds")
 
 top_otus_combo <- rf_sparse_combo %>% 
-  mutate(importance = map(rf, ~get_importance(.))) %>% 
+  mutate(importance = map(rf, ~get_importance_age(.))) %>% 
   unnest(importance)
 
 ```
@@ -1040,12 +1045,12 @@ model_test_predictions_drought %>%
 dr_pred_plot <- model_test_predictions_drought %>% 
   mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
   ggplot(aes(Soil, predictions, fill = Treatment)) +
-  #geom_hline(yintercept = 49, linetype = "dotted") +
-  geom_boxplot(outlier.size = 0.5, alpha = 1) +
+  geom_hline(yintercept = 49, linetype = "dotted") +
+  geom_boxplot(outlier.size = 0.5, alpha = 1, width = 0.5) +
   facet_grid(.~Compartment) +
   theme_minimal() +
   scale_fill_manual(values = c("#D8B365", "#5AB4AC")) +
-  labs(x = "", y = "Microbiota Age (Days)") +
+  labs(x = "", y = "Predicted Age (Days)") +
   theme(text = element_text(size = 15), axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "none")
 ```
 

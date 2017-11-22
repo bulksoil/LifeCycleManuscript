@@ -12,15 +12,22 @@ library(forcats)
 setwd("~/Google Drive/RMB/Analyses/LifeCycle/")
 ```
 ```{r}
-lc_data <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/lc_long_data.rds")
-lc_data <- lc_data %>% 
-  filter(Depth > 5000) %>% 
-  select(SampleID, Compartment, Plot, Cultivar, Site, State, Date, Age, Season, Genotype, Stage, Depth, variable, Collector, value) %>% 
-  filter(paste(Site, Season) == "Arbuckle 2014" | paste(Site, Season) == "Arbuckle 2015" | paste(Site, Season) == "Jonesboro 2016") %>% 
-  group_by(SampleID) %>% 
-  mutate(RA = (value / Depth) * 1000)
+## Do not run
+#lc_data <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/lc_long_data.rds")
+#lc_data <- lc_data %>% 
+#  filter(Depth > 5000) %>% 
+#  select(SampleID, Compartment, Plot, Cultivar, Site, State, Date, Age, Season, Genotype, Stage, Depth, variable, Collector, value) %>% 
+#  filter(paste(Site, Season) == "Arbuckle 2014" | paste(Site, Season) == "Arbuckle 2015" | paste(Site, Season) == "Jonesboro 2016") %>% 
+#  group_by(SampleID) %>% 
+#  mutate(RA = (value / Depth) * 1000) %>% 
+#  inner_join(runs, by = "SampleID")
+
+
+runs <- read.table("~/Google Drive/RMB/Analyses/LifeCycle/TABLES/Runs.txt", header = T)
+lc_data <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/cal_ark_data.rds")
+
 map <- lc_data %>% 
-  group_by(Compartment, Season, SampleID, Age, State, Site, Depth) %>% 
+  group_by(Compartment, Season, SampleID, Age, State, Site, Depth, MiSeqRun) %>% 
   filter(value > 0) %>% 
   summarise(richness = n()) %>% 
   group_by(Compartment, Site) %>% 
@@ -65,11 +72,12 @@ compartment.pc <- lc.pc$axes %>%
   theme(legend.position = "none") 
 
 age.pc <- lc.pc$axes %>% 
-  ggplot(aes(MDS1, MDS3, color = Age)) +
+  ggplot(aes(MDS1, MDS3, color = Age, shape = ifelse(Compartment == "Bulk Soil", "Bulk Soil", "Root-associated"))) +
   geom_point(alpha = 0.8) +
   theme_minimal() +
   scale_color_gradientn(colours = c("darkgreen", "darkolivegreen4", "darkgoldenrod1", "cornsilk")) +
   labs(x = "PCo1 (19.7%)", y = "PCo3 (7.5%)") +
+  scale_shape_manual(values = c(1, 16)) +
   theme(legend.position = "none") 
 ```
 
@@ -81,17 +89,49 @@ grid.arrange(compartment.pc, site.pc, age.pc, ncol = 3)
 ```{r}
 long_adonis <- function(x, formula) {
   x2 <- x %>% 
-    select(SampleID, variable, RA, Age, Compartment, Site, Season, Cultivar) %>% 
+    select(SampleID, variable, RA, Age, Compartment, Site, Season, Cultivar, MiSeqRun) %>% 
     spread(variable, RA, fill = 0)
   wide_dat <- x2[,7:ncol(x2)]
   temp_map <- x2[,1:7]
   adonis(as.formula(paste("log2(wide_dat + 1) ~ ", formula, sep = "")), data = temp_map)
 }
 
-whole_permanova <- long_adonis(lc_data, formula = "Site * Compartment * Age")
-ark_permanova <- long_adonis(lc_data %>% filter(Site == "Jonesboro"), formula = "Compartment * Age * Cultivar")
-arb_permanova <- long_adonis(lc_data %>% filter(Site == "Arbuckle"), formula = "Compartment * Age * Season")
+long_cap <- function(x, formula) {
+  x2 <- x %>% 
+    select(SampleID, variable, RA, Age, Compartment, Site, Season, Cultivar, MiSeqRun) %>% 
+    spread(variable, RA, fill = 0)
+  wide_dat <- x2[,7:ncol(x2)]
+  temp_map <- x2[,1:7]
+  capscale(as.formula(paste("log2(wide_dat + 1) ~ ", formula, sep = "")), data = temp_map)
+}
+
+whole_permanova <- long_adonis(lc_data, formula = "Site * Compartment * Age + MiSeqRun")
+ark_permanova <- long_adonis(lc_data %>% filter(Site == "Jonesboro"), formula = "Compartment * Age * Cultivar + MiSeqRun")
+arb_permanova <- long_adonis(lc_data %>% filter(Site == "Arbuckle"), formula = "Compartment * Age * Season + MiSeqRun")
+
+ark_cap <- long_cap(lc_data %>% filter(Site == "Jonesboro"), formula = "Compartment * Age * Cultivar + Condition(MiSeqRun)")
+anova(ark_cap, by = "terms")
+arb_cap <- long_cap(lc_data %>% filter(Site == "Arbuckle"), formula = "Compartment * Age * Season + Condition(MiSeqRun)")
+anova(arb_cap, by = "terms")
 ```
+```{r}
+
+```
+
+```{r}
+long_adonis(lc_data %>% filter(Site == "Jonesboro" & Compartment != "Endosphere"), formula = "Compartment")$aov.tab[1,c(5,6)]
+long_adonis(lc_data %>% filter(Site == "Jonesboro" & Compartment != "Bulk Soil"), formula = "Compartment")$aov.tab[1,c(5,6)]
+long_adonis(lc_data %>% filter(Site == "Jonesboro" & Compartment != "Rhizosphere"), formula = "Compartment")$aov.tab[1,c(5,6)]
+
+long_adonis(lc_data %>% filter(Site == "Arbuckle" & Compartment != "Rhizopshere" & Compartment != "Rhizoplane"), formula = "Compartment")$aov.tab[1,c(5,6)]
+long_adonis(lc_data %>% filter(Site == "Arbuckle" & Compartment != "Bulk Soil" & Compartment != "Rhizoplane"), formula = "Compartment")$aov.tab[1,c(5,6)]
+long_adonis(lc_data %>% filter(Site == "Arbuckle" & Compartment != "Bulk Soil" & Compartment != "Rhizosphere"), formula = "Compartment")$aov.tab[1,c(5,6)]
+
+long_adonis(lc_data %>% filter(Site == "Arbuckle" & Compartment != "Bulk Soil" & Compartment != "Endosphere"), formula = "Compartment")$aov.tab[1,c(5,6)]
+long_adonis(lc_data %>% filter(Site == "Arbuckle" & Compartment != "Endosphere" & Compartment != "Rhizosphere"), formula = "Compartment")$aov.tab[1,c(5,6)]
+long_adonis(lc_data %>% filter(Site == "Arbuckle" & Compartment != "Endosphere" & Compartment != "Rhizoplane"), formula = "Compartment")$aov.tab[1,c(5,6)]
+```
+
 
 ```{r}
 long_dist <- function(x) {
@@ -274,6 +314,8 @@ phylum.ra <- lc_data %>%
   group_by(SampleID, Age, Site, Season, Depth, Phylum2, Compartment) %>% 
   summarise(total_counts = sum(value) + 1) %>% 
   mutate(RA = total_counts / (Depth + 1))
+
+phylum.ra %>% ungroup() %>% write_tsv("~/Google Drive/RMB/Analyses/LifeCycle/Data/lc_phyla.tsv")
 ```
 ```{r}
 top.phy <- phylum.ra %>% 
