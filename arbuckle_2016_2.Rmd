@@ -22,7 +22,9 @@ library(randomForest)
 
 data.2016 <- readRDS("~/Google Drive/RMB/Analyses/LifeCycle/Data/cal_2016.rds")
 runs <- read.table("~/Google Drive/RMB/Analyses/LifeCycle/TABLES/Runs.txt", header = T)
-data.2016 <- data.2016 %>% inner_join(runs, by = "SampleID")
+data.2016 <- data.2016 %>% 
+  inner_join(runs, by = "SampleID") %>% 
+  mutate(Day_After_Germination = Day_After_Germination + 7)
 tax <- readRDS("~/RMB/Reference/gg_otus_tax.rds")
 ```
 
@@ -78,9 +80,9 @@ noBS_permanova <- long_adonis(data.2016 %>% ungroup() %>% filter(Compartment != 
 ```
 
 ```{r}
-m206v401permanovaPRE <- long_adonis(data.2016 %>% ungroup() %>% filter(Genotype == "M401" | Genotype == "M206") %>% filter(Day_After_Germination <= 63), 
+m206v401permanovaPRE <- long_adonis(data.2016 %>% ungroup() %>% filter(Genotype == "M401" | Genotype == "M206") %>% filter(Day_After_Germination <= 70), 
                                     formula = "Compartment * Day_After_Germination + Genotype")
-m206v401permanovaPOST <- long_adonis(data.2016 %>% ungroup() %>% filter(Genotype == "M206" | Genotype == "M401") %>% filter(Day_After_Germination > 63), 
+m206v401permanovaPOST <- long_adonis(data.2016 %>% ungroup() %>% filter(Genotype == "M206" | Genotype == "M401") %>% filter(Day_After_Germination > 70), 
                                     formula = "Compartment * Day_After_Germination + Genotype")
 ```
 
@@ -116,7 +118,7 @@ arb2016.CAP$axes %>%
 
 ```{r}
 m <- arb2016.pc$axes %>% 
-  group_by(half = ifelse(Day_After_Germination <= 77, "pre77", "post77"), Compartment) %>% 
+  group_by(half = ifelse(Day_After_Germination <= 84, "pre77", "post77"), Compartment) %>% 
   filter(Compartment != "Bulk Soil") %>% 
   nest() %>% 
   mutate(model = map(data, ~lm(MDS2 ~ Genotype * Day_After_Germination, .)),
