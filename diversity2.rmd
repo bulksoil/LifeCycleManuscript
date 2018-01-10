@@ -57,7 +57,7 @@ head(lc.pc$eig)
 ```{r}
 site.pc <- lc.pc$axes %>% 
   ggplot(aes(MDS1, MDS2, color = Site)) +
-  geom_point(alpha = 0.8) +
+  geom_point(alpha = 1) +
   theme_minimal() +
   scale_color_manual(values = c("#f57670ff", "steelblue")) +
   labs(x = "PCo1 (19.7%)", y = "PCo2 (13.5%)") +
@@ -65,7 +65,7 @@ site.pc <- lc.pc$axes %>%
 
 compartment.pc <- lc.pc$axes %>% 
   ggplot(aes(MDS1, MDS2, color = Compartment)) +
-  geom_point(alpha = 0.8) +
+  geom_point(alpha = 1) +
   theme_minimal() +
   scale_color_brewer(palette = "Set1") +
   labs(x = "PCo1 (19.7%)", y = "PCo2 (13.5%)") +
@@ -73,7 +73,7 @@ compartment.pc <- lc.pc$axes %>%
 
 age.pc <- lc.pc$axes %>% 
   ggplot(aes(MDS1, MDS3, color = Age, shape = ifelse(Compartment == "Bulk Soil", "Bulk Soil", "Root-associated"))) +
-  geom_point(alpha = 0.8) +
+  geom_point(alpha = 1) +
   theme_minimal() +
   scale_color_gradientn(colours = c("darkgreen", "darkolivegreen4", "darkgoldenrod1", "cornsilk")) +
   labs(x = "PCo1 (19.7%)", y = "PCo3 (7.5%)") +
@@ -445,7 +445,21 @@ grid.arrange(phy.plot, model.plot, nrow = 2)
 
 
 ```{r}
+adiv <- lc_data %>% 
+  group_by(SampleID, Season, Site, Compartment, Age, State) %>% 
+  filter(value > 0) %>% 
+  mutate(RA = RA / 1000) %>% 
+  summarise(richness = sum(value > 0), shannon = -sum(log(RA) * RA))
 
+adiv %>% 
+  ggplot(aes(Age, shannon, color = Compartment)) +
+  geom_point(alpha = 0.2) +
+  facet_grid(.~Season + State) +
+  stat_smooth() +
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "Plant Age (Days)", y = "Shannon Index") +
+  theme(text = element_text(size = 12))
 ```
 
 
