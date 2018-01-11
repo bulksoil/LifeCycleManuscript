@@ -96,7 +96,7 @@ head(arb2016.pc$eig)
 pc_plot <- arb2016.pc$axes %>% 
   mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
   ggplot(aes(MDS1, MDS2, color = Day_After_Germination)) +
-  geom_point(alpha = 0.8) +
+  geom_point(alpha = 1) +
   theme_minimal() +
   scale_color_gradientn(colors = c("darkgreen", "darkolivegreen4", "darkgoldenrod1", "cornsilk")) +
   labs(x = "PCo1 (28.2%)", y = "PCo2 (9.3%)") +
