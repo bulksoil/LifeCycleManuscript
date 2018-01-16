@@ -47,6 +47,9 @@ clean_stats <- lc_data %>%
   summarise(prevalence = sum(value > 0) / n(), mean_ab = mean(value)) %>% 
   mutate(status = ifelse(prevalence >= 0.05, "keep", "discard"))
 
+clean_stats %>% 
+  write_tsv("~/Google Drive/RMB/Analyses/LifeCycle/TABLES/otu_stats.tsv")
+
 ggplot(clean_stats, aes(x = mean_ab/10, y = prevalence, color = status)) +
   geom_point(alpha = 0.05) +
   #scale_y_log10() +
