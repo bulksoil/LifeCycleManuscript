@@ -583,7 +583,6 @@ otu_directions_combo %>%
   #filter(classification != "Neutral") %>% 
   mutate(sig = ifelse(comp_p.adj <= 0.05, "sig", "ns")) %>% 
   group_by(classification) %>% 
-  mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
   ggplot(aes(direction_estimate, comp_estimate, color = classification, shape = sig)) +
   geom_point(size = 3) +
   scale_shape_manual(values = c(1, 16)) +

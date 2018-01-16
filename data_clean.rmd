@@ -1,0 +1,62 @@
+---
+title: "Importing and Cleaning Data"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(reshape2)
+setwd("~/Google Drive/RMB/Analyses/LifeCycle/")
+```
+
+## Get the maps in order
+```{r}
+map_arkansas <- read_tsv("~/Google Drive/RMB/Analyses/LifeCycle/Data/maps/ark_map.txt") %>% mutate(Plot = as.character(Plot))
+map_irri_ltcce1 <- read_tsv("~/Google Drive/RMB/Analyses/LifeCycle/Data/maps/LTCCE1.map")
+map_irri_ltcce2 <- read_tsv("~/Google Drive/RMB/Analyses/LifeCycle/Data/maps/LTCCE.2.map")
+map_irri_B2 <- read_tsv("~/Google Drive/RMB/Analyses/LifeCycle/Data/maps/B2.DS16.map")
+map_lundberg <- read_tsv("~/Google Drive/RMB/Analyses/LifeCycle/Data/maps/field_metadata.txt") %>% mutate(Date = "7/19/13")
+map_lifecylce <- read_tsv("~/Google Drive/RMB/Analyses/LifeCycle/Data/life_cycle_map.txt", guess_max = 2000) %>% filter(paste(State, Season) != "California 2016")
+map_arbuckle_2016 <- read_tsv("~/Google Drive/RMB/Analyses/LifeCycle/Data/maps/arb2016.map")
+total_map <- bind_rows(map_arkansas, map_irri_B2, map_irri_ltcce1, map_irri_ltcce2, map_lundberg, map_lifecylce, map_arbuckle_2016)
+```
+
+```{r}
+org <- readRDS("~/RMB/Reference/organelle.rds")
+counts <- read.table(gzfile("~/Google Drive/RMB/Analyses/LifeCycle/Data/lc_otu_table.tsv.gz"), header = T, row.names = 1, sep = "\t")
+counts_no_org <- counts[!row.names(counts)%in%org, match(intersect(colnames(counts), total_map$SampleID), colnames(counts))]
+total_map <- total_map[match(colnames(counts_no_org), total_map$SampleID),]
+lc_data <- melt(cbind(total_map, t(counts_no_org)), id.vars = names(total_map))
+```
+
+## Remove OTUs which are in less than 5% of the samples
+```{r}
+lc_data_clean <- lc_data %>% 
+  group_by(SampleID) %>% 
+  mutate(Depth = sum(value), RA = (value / Depth) * 1000) %>% 
+  group_by(variable) %>% 
+  mutate(prevalenceifelse(sum(value > 0) / n() >= 0.05, "Keep", "discard"))
+saveRDS(lc_data_clean, file = "lc_long_data.rds")
+```
+
+```{r}
+clean_stats <- lc_data %>% 
+  group_by(SampleID) %>% 
+  mutate(RA = 1000 * value / (sum(value))) %>% 
+  group_by(variable) %>% 
+  summarise(prevalence = sum(value > 0) / n(), mean_ab = mean(value)) %>% 
+  mutate(status = ifelse(prevalence >= 0.05, "keep", "discard"))
+
+ggplot(clean_stats, aes(x = mean_ab/10, y = prevalence, color = status)) +
+  geom_point(alpha = 0.05) +
+  #scale_y_log10() +
+  scale_x_log10() +
+  scale_color_manual(values = c("red", "black")) +
+  theme_minimal() +
+  labs(x = "Mean Relative Abundance (log10 %)", y = "Prevalence")
+
+clean_stats %>% 
+  filter(status == "discard") %>% 
+  arrange(-mean_ab)
+```
+

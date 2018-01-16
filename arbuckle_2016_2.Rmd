@@ -259,9 +259,13 @@ model_test_predictions_combo <- data.2016 %>% ungroup() %>%
   mutate(model = Compartment)
 
 model_test_predictions_combo %>% 
+  unnest(predictions) %>% select(Compartment, SampleID, Day_After_Germination, Genotype, predictions) %>% 
+  write_tsv("~/Google Drive/RMB/Analyses/LifeCycle/TABLES/arb2016_age_predictions.tsv")
+
+model_test_predictions_combo %>% 
   unnest(predictions) %>% 
   mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Endosphere")) %>% 
-  ggplot(aes(x = Day_After_Germination, predictions, color = Genotype)) +
+  ggplot(aes(x = Day_After_Germination, y =predictions, color = Genotype)) +
   geom_abline(slope = 1, intercept = 0, linetype = "dotted") +
   geom_point(alpha = 0.5) +
   geom_smooth(se = F) +
@@ -460,7 +464,7 @@ otu_directions %>%
 otu_directions %>% 
   inner_join(tax, by = "variable") %>% 
   ungroup() %>% 
-  mutate(classification = fct_relevel(classification, "Decreasing", "Neutral", "Increasing")) %>% 
+
   mutate(Compartment = fct_relevel(Compartment, "Rhizosphere", "Rhizoplane", "Endosphere")) %>% 
   ggplot(aes(Phylum2, fill = Order)) +
   geom_bar() +

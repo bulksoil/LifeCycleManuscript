@@ -175,7 +175,6 @@ lc_bray_m %>%
   filter(Site.x != Site.y) %>% 
   mutate(Stage = factor(ifelse(Age.x < 63, "Vegetative", "Reproductive"))) %>% 
   mutate(Stage = fct_relevel(Stage, "Vegetative", "Reproductive")) %>% 
-  filter(Compartment.x == "Bulk Soil") %>% 
   ggplot(aes(Age.x, 1-value, group = Compartment.x, color = Compartment.x)) +
   geom_point(position = position_jitterdodge(), alpha = 0.3) +
   theme_minimal() +
@@ -460,6 +459,9 @@ adiv %>%
   scale_color_brewer(palette = "Set1") +
   labs(x = "Plant Age (Days)", y = "Shannon Index") +
   theme(text = element_text(size = 12))
+
+adiv %>% 
+  write_tsv("~/Google Drive/RMB/Analyses/LifeCycle/TABLES/adiv.tsv")
 ```
 
 
