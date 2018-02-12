@@ -1,4 +1,4 @@
-# LiceCycleManuscript
+# LifeCycleManuscript
 
 This repository contains all the data associated with manuscript to be published in PLoS Biology (currently in press). 
 
